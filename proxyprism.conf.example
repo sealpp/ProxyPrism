@@ -1,0 +1,63 @@
+# ProxyPrism Linux CLI system configuration file.
+# Place this file at /etc/proxyprism.conf or pass a custom path with:
+#   sudo proxyprism --config /path/to/your.conf
+#
+# This file uses TOML syntax (https://toml.io). Command-line options override
+# values from this file. If you store proxy credentials here, set the file
+# permissions to 600 (rw-------) after editing.
+
+version = "1.0"
+
+[proxy]
+# Proxy URL format: type://host:port or type://host:port:username:password
+# Supported types: socks5, http
+url = "socks5://127.0.0.1:1080"
+
+[options]
+# Route DNS queries through the proxy (true/false).
+dns_via_proxy = true
+
+# Logging verbosity: 0 = silent, 1 = logs, 2 = connections, 3 = both.
+verbose = 0
+
+# Rules are evaluated in order. Use [[rules]] for each rule.
+# Supported fields per rule:
+#   process   - process name, wildcard (*), or multiple names separated by ';'
+#   hosts     - IP, hostname, wildcard, IP range, or multiple values
+#   ports     - port, port range, or multiple values separated by ';' or ','
+#   protocol  - TCP, UDP, or BOTH
+#   action    - PROXY, DIRECT, or BLOCK
+#   enabled   - true/false (optional, default true)
+#
+# You may also use TOML arrays for process/hosts/ports, e.g.:
+#   process = ["curl", "wget"]
+
+[[rules]]
+process = "curl"
+hosts = "*"
+ports = "*"
+protocol = "TCP"
+action = "PROXY"
+
+[[rules]]
+process = "firefox"
+hosts = "*"
+ports = "80;443"
+protocol = "TCP"
+action = "DIRECT"
+
+[[rules]]
+process = "*"
+hosts = "*"
+ports = "53"
+protocol = "UDP"
+action = "PROXY"
+
+# Example: block a specific application.
+# [[rules]]
+# process = "malware"
+# hosts = "*"
+# ports = "*"
+# protocol = "BOTH"
+# action = "BLOCK"
+# enabled = true

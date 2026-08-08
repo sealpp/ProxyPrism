@@ -1,0 +1,12 @@
+[submodule "libmnl"]
+	path = contrib/libmnl
+	url = https://git.netfilter.org/libmnl
+[submodule "libnfnetlink"]
+	path = contrib/libnfnetlink
+	url = https://git.netfilter.org/libnfnetlink
+[submodule "libnetfilter_queue"]
+	path = contrib/libnetfilter_queue
+	url = https://git.netfilter.org/libnetfilter_queue
+[submodule "tomlc17"]
+	path = contrib/tomlc17
+	url = https://github.com/cktan/tomlc17
