@@ -1,42 +1,44 @@
 #include "ProxyPrism.h"
-#include <ctype.h>
-#include <dirent.h>
-#include <errno.h>
-#include <fcntl.h>
-#include <netdb.h>
-#include <poll.h>
-#include <pthread.h>
-#include <signal.h>
-#include <stdarg.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <unistd.h>
 #include <arpa/inet.h>
+#include <cctype>
+#include <cerrno>
+#include <cstdarg>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <dirent.h>
+#include <fcntl.h>
 #include <libnetfilter_queue/libnetfilter_queue.h>
 #include <linux/inet_diag.h>
 #include <linux/netfilter.h>
 #include <linux/netlink.h>
 #include <linux/sock_diag.h>
+#include <netdb.h>
 #include <netinet/in.h>
 #include <netinet/ip.h>
 #include <netinet/tcp.h>
 #include <netinet/udp.h>
+#include <poll.h>
+#include <pthread.h>
+#include <signal.h>
 #include <sys/epoll.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
+#include <unistd.h>
 
-#define LOCAL_PROXY_PORT 34010
-#define LOCAL_UDP_RELAY_PORT 34011
-#define MAX_PROCESS_NAME 256
-#define PID_CACHE_SIZE 1024
-#define PID_CACHE_TTL_MS 1000
-#define NUM_PACKET_THREADS 4
-#define CONNECTION_HASH_SIZE 256
-#define SOCKS5_BUFFER_SIZE 1024
-#define HTTP_BUFFER_SIZE 1024
-#define LOG_BUFFER_SIZE 1024
+namespace proxyprism {
+
+constexpr std::uint16_t LOCAL_PROXY_PORT = 34010;
+constexpr std::uint16_t LOCAL_UDP_RELAY_PORT = 34011;
+constexpr std::size_t MAX_PROCESS_NAME = 256;
+constexpr std::uint32_t PID_CACHE_SIZE = 1024;
+constexpr std::uint64_t PID_CACHE_TTL_MS = 1000;
+constexpr std::size_t NUM_PACKET_THREADS = 4;
+constexpr std::uint32_t CONNECTION_HASH_SIZE = 256;
+constexpr std::size_t SOCKS5_BUFFER_SIZE = 1024;
+constexpr std::size_t HTTP_BUFFER_SIZE = 1024;
+constexpr std::size_t LOG_BUFFER_SIZE = 1024
 
 // safe way to run commands without shell injection issues
 static int run_command_v(const char * cmd_path, char * const argv[])
@@ -122,7 +124,7 @@ static int run_iptables_cmd(
         argv[i++] = arg13;
     if (arg14)
         argv[i++] = arg14;
-    argv[i] = NULL;
+    argv[i] = nullptr;
 
     return run_command_v("iptables", (char **)argv);
 }
@@ -188,9 +190,9 @@ typedef struct PID_CACHE_ENTRY
     struct PID_CACHE_ENTRY * next;
 } PID_CACHE_ENTRY;
 
-static CONNECTION_INFO * connection_hash_table[CONNECTION_HASH_SIZE] = {NULL};
-static LOGGED_CONNECTION * logged_connections = NULL;
-static PROCESS_RULE * rules_list = NULL;
+static CONNECTION_INFO * connection_hash_table[CONNECTION_HASH_SIZE] = {nullptr};
+static LOGGED_CONNECTION * logged_connections = nullptr;
+static PROCESS_RULE * rules_list = nullptr;
 static uint32_t g_next_rule_id = 1;
 static pthread_rwlock_t conn_lock = PTHREAD_RWLOCK_INITIALIZER; // read-heavy connection hash
 static pthread_rwlock_t rules_lock = PTHREAD_RWLOCK_INITIALIZER; // read-heavy rules list
@@ -210,13 +212,13 @@ typedef struct
     int to_socket;
 } transfer_config_t;
 
-static struct nfq_handle * nfq_h = NULL;
-static struct nfq_q_handle * nfq_qh = NULL;
+static struct nfq_handle * nfq_h = nullptr;
+static struct nfq_q_handle * nfq_qh = nullptr;
 static pthread_t packet_thread[NUM_PACKET_THREADS] = {0};
 static pthread_t proxy_thread = 0;
 static pthread_t udp_relay_thread = 0;
 static pthread_t cleanup_thread = 0;
-static PID_CACHE_ENTRY * pid_cache[PID_CACHE_SIZE] = {NULL};
+static PID_CACHE_ENTRY * pid_cache[PID_CACHE_SIZE] = {nullptr};
 static bool g_has_active_rules = false;
 static bool running = false;
 static uint32_t g_current_process_id = 0;
@@ -234,17 +236,17 @@ static bool g_traffic_logging_enabled = true;
 static char g_proxy_host[256] = "";
 static uint16_t g_proxy_port = 0;
 static uint16_t g_local_relay_port = LOCAL_PROXY_PORT;
-static ProxyType g_proxy_type = PROXY_TYPE_SOCKS5;
+static ProxyType g_proxy_type = ProxyType::SOCKS5;
 static char g_proxy_username[256] = "";
 static char g_proxy_password[256] = "";
 static bool g_dns_via_proxy = true;
 static uint32_t g_proxy_ip_cached = 0; // Cached resolved proxy IP
-static LogCallback g_log_callback = NULL;
-static ConnectionCallback g_connection_callback = NULL;
+static LogCallback g_log_callback = nullptr;
+static ConnectionCallback g_connection_callback = nullptr;
 
 static void log_message(const char * msg, ...)
 {
-    if (g_log_callback == NULL)
+    if (g_log_callback == nullptr)
         return;
     char buffer[LOG_BUFFER_SIZE];
     va_list args;
@@ -278,19 +280,19 @@ typedef bool (*token_match_func)(const char * token, const void * data);
 
 static bool parse_token_list(const char * list, const char * delimiters, token_match_func match_func, const void * match_data)
 {
-    if (list == NULL || list[0] == '\0' || strcmp(list, "*") == 0)
+    if (list == nullptr || list[0] == '\0' || strcmp(list, "*") == 0)
         return true;
 
     size_t len = strlen(list) + 1;
     char * list_copy = (char *)malloc(len);
-    if (list_copy == NULL)
+    if (list_copy == nullptr)
         return false;
 
     memcpy(list_copy, list, len); // copy including null terminator
     bool matched = false;
-    char * saveptr = NULL;
+    char * saveptr = nullptr;
     char * token = strtok_r(list_copy, delimiters, &saveptr);
-    while (token != NULL)
+    while (token != nullptr)
     {
         token = skip_whitespace(token);
 
@@ -307,7 +309,7 @@ static bool parse_token_list(const char * list, const char * delimiters, token_m
             matched = true;
             break;
         }
-        token = strtok_r(NULL, delimiters, &saveptr);
+        token = strtok_r(nullptr, delimiters, &saveptr);
     }
     free(list_copy);
     return matched;
@@ -400,7 +402,7 @@ static uint32_t find_pid_from_inode(unsigned long target_inode, uint32_t uid_hin
     uint32_t pid = 0;
     struct dirent * proc_entry;
 
-    while ((proc_entry = readdir(proc_dir)) != NULL)
+    while ((proc_entry = readdir(proc_dir)) != nullptr)
     {
         // skip stuff that aint a pid folder
         if (proc_entry->d_type != DT_DIR || !isdigit(proc_entry->d_name[0]))
@@ -424,7 +426,7 @@ static uint32_t find_pid_from_inode(unsigned long target_inode, uint32_t uid_hin
             continue;
 
         struct dirent * fd_entry;
-        while ((fd_entry = readdir(fd_dir)) != NULL)
+        while ((fd_entry = readdir(fd_dir)) != nullptr)
         {
             if (fd_entry->d_name[0] == '.')
                 continue;
@@ -613,7 +615,7 @@ static bool get_process_name_from_pid(uint32_t pid, char * name, size_t name_siz
 
 static bool match_ip_pattern(const char * pattern, uint32_t ip)
 {
-    if (pattern == NULL || strcmp(pattern, "*") == 0)
+    if (pattern == nullptr || strcmp(pattern, "*") == 0)
         return true;
 
     unsigned char ip_octets[4];
@@ -656,7 +658,7 @@ static bool match_ip_pattern(const char * pattern, uint32_t ip)
             continue;
 
         char * dash = strchr(pattern_octets[i], '-');
-        if (dash != NULL)
+        if (dash != nullptr)
         {
             int start = safe_atoi(pattern_octets[i]);
             int end = safe_atoi(dash + 1);
@@ -675,11 +677,11 @@ static bool match_ip_pattern(const char * pattern, uint32_t ip)
 
 static bool match_port_pattern(const char * pattern, uint16_t port)
 {
-    if (pattern == NULL || strcmp(pattern, "*") == 0)
+    if (pattern == nullptr || strcmp(pattern, "*") == 0)
         return true;
 
     const char * dash = strchr(pattern, '-');
-    if (dash != NULL)
+    if (dash != nullptr)
     {
         int start_port = safe_atoi(pattern);
         int end_port = safe_atoi(dash + 1);
@@ -711,11 +713,11 @@ static bool match_port_list(const char * port_list, uint16_t port)
 
 static bool match_process_pattern(const char * pattern, const char * process_full_path)
 {
-    if (pattern == NULL || strcmp(pattern, "*") == 0)
+    if (pattern == nullptr || strcmp(pattern, "*") == 0)
         return true;
 
     const char * filename = strrchr(process_full_path, '/');
-    if (filename != NULL)
+    if (filename != nullptr)
         filename++;
     else
         filename = process_full_path;
@@ -724,7 +726,7 @@ static bool match_process_pattern(const char * pattern, const char * process_ful
     size_t name_len = strlen(filename);
     size_t full_path_len = strlen(process_full_path);
 
-    bool is_full_path_pattern = (strchr(pattern, '/') != NULL);
+    bool is_full_path_pattern = (strchr(pattern, '/') != nullptr);
     const char * match_target = is_full_path_pattern ? process_full_path : filename;
     size_t target_len = is_full_path_pattern ? full_path_len : name_len;
 
@@ -776,27 +778,27 @@ static uint32_t parse_ipv4(const char * ip)
 
 static uint32_t resolve_hostname(const char * hostname)
 {
-    if (hostname == NULL || hostname[0] == '\0')
+    if (hostname == nullptr || hostname[0] == '\0')
         return 0;
 
     uint32_t ip = parse_ipv4(hostname);
     if (ip != 0)
         return ip;
 
-    struct addrinfo hints, *result = NULL;
+    struct addrinfo hints, *result = nullptr;
     memset(&hints, 0, sizeof(hints));
     hints.ai_family = AF_INET;
     hints.ai_socktype = SOCK_STREAM;
 
-    if (getaddrinfo(hostname, NULL, &hints, &result) != 0)
+    if (getaddrinfo(hostname, nullptr, &hints, &result) != 0)
     {
         log_message("failed to resolve hostname: %s", hostname);
         return 0;
     }
 
-    if (result == NULL || result->ai_family != AF_INET)
+    if (result == nullptr || result->ai_family != AF_INET)
     {
-        if (result != NULL)
+        if (result != nullptr)
             freeaddrinfo(result);
         log_message("no ipv4 address found for hostname: %s", hostname);
         return 0;
@@ -839,9 +841,9 @@ static bool is_broadcast_or_multicast(uint32_t ip)
 static RuleAction match_rule(const char * process_name, uint32_t dest_ip, uint16_t dest_port, bool is_udp)
 {
     PROCESS_RULE * rule = rules_list;
-    PROCESS_RULE * wildcard_rule = NULL;
+    PROCESS_RULE * wildcard_rule = nullptr;
 
-    while (rule != NULL)
+    while (rule != nullptr)
     {
         if (!rule->enabled)
         {
@@ -849,14 +851,14 @@ static RuleAction match_rule(const char * process_name, uint32_t dest_ip, uint16
             continue;
         }
 
-        if (rule->protocol != RULE_PROTOCOL_BOTH)
+        if (rule->protocol != RuleProtocol::BOTH)
         {
-            if (rule->protocol == RULE_PROTOCOL_TCP && is_udp)
+            if (rule->protocol == RuleProtocol::TCP && is_udp)
             {
                 rule = rule->next;
                 continue;
             }
-            if (rule->protocol == RULE_PROTOCOL_UDP && !is_udp)
+            if (rule->protocol == RuleProtocol::UDP && !is_udp)
             {
                 rule = rule->next;
                 continue;
@@ -880,7 +882,7 @@ static RuleAction match_rule(const char * process_name, uint32_t dest_ip, uint16
                 continue;
             }
 
-            if (wildcard_rule == NULL)
+            if (wildcard_rule == nullptr)
             {
                 wildcard_rule = rule;
             }
@@ -899,12 +901,12 @@ static RuleAction match_rule(const char * process_name, uint32_t dest_ip, uint16
         rule = rule->next;
     }
 
-    if (wildcard_rule != NULL)
+    if (wildcard_rule != nullptr)
     {
         return wildcard_rule->action;
     }
 
-    return RULE_ACTION_DIRECT;
+    return RuleAction::DIRECT;
 }
 
 static RuleAction
@@ -915,29 +917,29 @@ check_process_rule(uint32_t src_ip, uint16_t src_port, uint32_t dest_ip, uint16_
 
     pid = get_process_id_from_connection(src_ip, src_port, is_udp);
 
-    if (out_pid != NULL)
+    if (out_pid != nullptr)
         *out_pid = pid;
 
     if (pid == 0)
-        return RULE_ACTION_DIRECT;
+        return RuleAction::DIRECT;
 
     if (pid == g_current_process_id)
-        return RULE_ACTION_DIRECT;
+        return RuleAction::DIRECT;
 
     if (!get_process_name_from_pid(pid, process_name, sizeof(process_name)))
-        return RULE_ACTION_DIRECT;
+        return RuleAction::DIRECT;
 
     pthread_rwlock_rdlock(&rules_lock);
     RuleAction action = match_rule(process_name, dest_ip, dest_port, is_udp);
     pthread_rwlock_unlock(&rules_lock);
 
-    if (action == RULE_ACTION_PROXY && is_udp && g_proxy_type == PROXY_TYPE_HTTP)
+    if (action == RuleAction::PROXY && is_udp && g_proxy_type == ProxyType::HTTP)
     {
-        return RULE_ACTION_DIRECT;
+        return RuleAction::DIRECT;
     }
-    if (action == RULE_ACTION_PROXY && (g_proxy_host[0] == '\0' || g_proxy_port == 0))
+    if (action == RuleAction::PROXY && (g_proxy_host[0] == '\0' || g_proxy_port == 0))
     {
-        return RULE_ACTION_DIRECT;
+        return RuleAction::DIRECT;
     }
 
     return action;
@@ -1129,7 +1131,7 @@ static void * connection_handler(void * arg)
         if (proxy_ip == 0)
         {
             close(client_sock);
-            return NULL;
+            return nullptr;
         }
         g_proxy_ip_cached = proxy_ip;
     }
@@ -1138,7 +1140,7 @@ static void * connection_handler(void * arg)
     if (proxy_sock < 0)
     {
         close(client_sock);
-        return NULL;
+        return nullptr;
     }
 
     configure_tcp_socket(proxy_sock, 1048576, 60000);
@@ -1153,26 +1155,26 @@ static void * connection_handler(void * arg)
     {
         close(client_sock);
         close(proxy_sock);
-        return NULL;
+        return nullptr;
     }
 
     // do handshake blocking
-    if (g_proxy_type == PROXY_TYPE_SOCKS5)
+    if (g_proxy_type == ProxyType::SOCKS5)
     {
         if (socks5_connect(proxy_sock, dest_ip, dest_port) != 0)
         {
             close(client_sock);
             close(proxy_sock);
-            return NULL;
+            return nullptr;
         }
     }
-    else if (g_proxy_type == PROXY_TYPE_HTTP)
+    else if (g_proxy_type == ProxyType::HTTP)
     {
         if (http_connect(proxy_sock, dest_ip, dest_port) != 0)
         {
             close(client_sock);
             close(proxy_sock);
-            return NULL;
+            return nullptr;
         }
     }
     // Disable timeout for data transfer phase
@@ -1198,11 +1200,11 @@ static void * connection_handler(void * arg)
 
     // setup transfer config
     transfer_config_t * transfer_config = (transfer_config_t *)malloc(sizeof(transfer_config_t));
-    if (transfer_config == NULL)
+    if (transfer_config == nullptr)
     {
         close(client_sock);
         close(proxy_sock);
-        return NULL;
+        return nullptr;
     }
 
     transfer_config->from_socket = client_sock;
@@ -1211,7 +1213,7 @@ static void * connection_handler(void * arg)
     // transfer data both ways in this thread
     transfer_handler((void *)transfer_config);
 
-    return NULL;
+    return nullptr;
 }
 
 // relay data both ways using splice for zero-copy
@@ -1317,7 +1319,7 @@ static void * transfer_handler(void * arg)
 
             if (!sock2_done && pipe_a_bytes == 0 && (fds[1].revents & POLLIN))
             {
-                ssize_t n = splice(sock2, NULL, pipe_a[1], NULL, 1048576, SPLICE_F_MOVE | SPLICE_F_NONBLOCK);
+                ssize_t n = splice(sock2, nullptr, pipe_a[1], nullptr, 1048576, SPLICE_F_MOVE | SPLICE_F_NONBLOCK);
                 if (n > 0)
                 {
                     pipe_a_bytes = n;
@@ -1334,7 +1336,7 @@ static void * transfer_handler(void * arg)
 
             if (pipe_a_bytes > 0 && (fds[0].revents & POLLOUT))
             {
-                ssize_t n = splice(pipe_a[0], NULL, sock1, NULL, pipe_a_bytes, SPLICE_F_MOVE | SPLICE_F_NONBLOCK);
+                ssize_t n = splice(pipe_a[0], nullptr, sock1, nullptr, pipe_a_bytes, SPLICE_F_MOVE | SPLICE_F_NONBLOCK);
                 if (n > 0)
                 {
                     pipe_a_bytes -= n;
@@ -1349,7 +1351,7 @@ static void * transfer_handler(void * arg)
 
             if (!sock1_done && pipe_b_bytes == 0 && (fds[0].revents & POLLIN))
             {
-                ssize_t n = splice(sock1, NULL, pipe_b[1], NULL, 1048576, SPLICE_F_MOVE | SPLICE_F_NONBLOCK);
+                ssize_t n = splice(sock1, nullptr, pipe_b[1], nullptr, 1048576, SPLICE_F_MOVE | SPLICE_F_NONBLOCK);
                 if (n > 0)
                 {
                     pipe_b_bytes = n;
@@ -1366,7 +1368,7 @@ static void * transfer_handler(void * arg)
 
             if (pipe_b_bytes > 0 && (fds[1].revents & POLLOUT))
             {
-                ssize_t n = splice(pipe_b[0], NULL, sock2, NULL, pipe_b_bytes, SPLICE_F_MOVE | SPLICE_F_NONBLOCK);
+                ssize_t n = splice(pipe_b[0], nullptr, sock2, nullptr, pipe_b_bytes, SPLICE_F_MOVE | SPLICE_F_NONBLOCK);
                 if (n > 0)
                 {
                     pipe_b_bytes -= n;
@@ -1456,7 +1458,7 @@ cleanup:
     shutdown(sock2, SHUT_RDWR);
     close(sock1);
     close(sock2);
-    return NULL;
+    return nullptr;
 }
 
 // proxy server accepts connections and spawns threads
@@ -1471,7 +1473,7 @@ static void * local_proxy_server(void * arg)
     if (listen_sock < 0)
     {
         log_message("Socket creation failed");
-        return NULL;
+        return nullptr;
     }
 
     setsockopt(listen_sock, SOL_SOCKET, SO_REUSEADDR, &on, sizeof(on));
@@ -1486,14 +1488,14 @@ static void * local_proxy_server(void * arg)
     {
         log_message("Bind failed");
         close(listen_sock);
-        return NULL;
+        return nullptr;
     }
 
     if (listen(listen_sock, SOMAXCONN) < 0)
     {
         log_message("Listen failed");
         close(listen_sock);
-        return NULL;
+        return nullptr;
     }
 
     // create thread attrs with small stack (256kb not 8mb)
@@ -1521,7 +1523,7 @@ static void * local_proxy_server(void * arg)
             continue;
 
         connection_config_t * conn_config = (connection_config_t *)malloc(sizeof(connection_config_t));
-        if (conn_config == NULL)
+        if (conn_config == nullptr)
         {
             close(client_sock);
             continue;
@@ -1548,7 +1550,7 @@ static void * local_proxy_server(void * arg)
 
     pthread_attr_destroy(&thread_attr);
     close(listen_sock);
-    return NULL;
+    return nullptr;
 }
 
 // socks5 udp associate
@@ -1733,7 +1735,7 @@ static void * udp_relay_server(void * arg)
 
     udp_relay_socket = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
     if (udp_relay_socket < 0)
-        return NULL;
+        return nullptr;
 
     int on = 1;
     setsockopt(udp_relay_socket, SOL_SOCKET, SO_REUSEADDR, &on, sizeof(on));
@@ -1748,7 +1750,7 @@ static void * udp_relay_server(void * arg)
     {
         close(udp_relay_socket);
         udp_relay_socket = -1;
-        return NULL;
+        return nullptr;
     }
 
     // try initial connect, not fatal if proxy not up yet
@@ -1912,7 +1914,7 @@ static void * udp_relay_server(void * arg)
             for (int hash = 0; hash < CONNECTION_HASH_SIZE; hash++)
             {
                 CONNECTION_INFO * conn = connection_hash_table[hash];
-                while (conn != NULL)
+                while (conn != nullptr)
                 {
                     if (conn->orig_dest_ip == src_ip && conn->orig_dest_port == src_port)
                     {
@@ -1953,7 +1955,7 @@ static void * udp_relay_server(void * arg)
     if (udp_relay_socket >= 0)
         close(udp_relay_socket);
 
-    return NULL;
+    return nullptr;
 }
 
 // nfqueue callback for packets
@@ -1964,32 +1966,32 @@ static int packet_callback(struct nfq_q_handle * qh, struct nfgenmsg * nfmsg, st
 
     struct nfqnl_msg_packet_hdr * ph = nfq_get_msg_packet_hdr(nfad);
     if (!ph)
-        return nfq_set_verdict(qh, 0, NF_ACCEPT, 0, NULL);
+        return nfq_set_verdict(qh, 0, NF_ACCEPT, 0, nullptr);
 
     uint32_t id = ntohl(ph->packet_id);
 
     unsigned char * payload;
     int payload_len = nfq_get_payload(nfad, &payload);
     if (payload_len < (int)sizeof(struct iphdr))
-        return nfq_set_verdict(qh, id, NF_ACCEPT, 0, NULL);
+        return nfq_set_verdict(qh, id, NF_ACCEPT, 0, nullptr);
 
     struct iphdr * iph = (struct iphdr *)payload;
 
     // fast path when no rules
-    if (!g_has_active_rules && g_connection_callback == NULL)
-        return nfq_set_verdict(qh, id, NF_ACCEPT, 0, NULL);
+    if (!g_has_active_rules && g_connection_callback == nullptr)
+        return nfq_set_verdict(qh, id, NF_ACCEPT, 0, nullptr);
 
     uint32_t src_ip = iph->saddr;
     uint32_t dest_ip = iph->daddr;
     uint16_t src_port = 0;
     uint16_t dest_port = 0;
-    RuleAction action = RULE_ACTION_DIRECT;
+    RuleAction action = RuleAction::DIRECT;
     uint32_t pid = 0;
 
     if (iph->protocol == IPPROTO_TCP)
     {
         if (payload_len < (int)(iph->ihl * 4 + sizeof(struct tcphdr)))
-            return nfq_set_verdict(qh, id, NF_ACCEPT, 0, NULL);
+            return nfq_set_verdict(qh, id, NF_ACCEPT, 0, nullptr);
 
         struct tcphdr * tcph = (struct tcphdr *)(payload + iph->ihl * 4);
         src_port = ntohs(tcph->source);
@@ -1997,25 +1999,25 @@ static int packet_callback(struct nfq_q_handle * qh, struct nfgenmsg * nfmsg, st
 
         // skip our own packets from local relay
         if (src_port == g_local_relay_port)
-            return nfq_set_verdict(qh, id, NF_ACCEPT, 0, NULL);
+            return nfq_set_verdict(qh, id, NF_ACCEPT, 0, nullptr);
 
         if (is_connection_tracked(src_port))
-            return nfq_set_verdict(qh, id, NF_ACCEPT, 0, NULL);
+            return nfq_set_verdict(qh, id, NF_ACCEPT, 0, nullptr);
 
         // only look at syn packets for new connections
         if (!(tcph->syn && !tcph->ack))
-            return nfq_set_verdict(qh, id, NF_ACCEPT, 0, NULL);
+            return nfq_set_verdict(qh, id, NF_ACCEPT, 0, nullptr);
 
         if (dest_port == 53 && !g_dns_via_proxy)
-            action = RULE_ACTION_DIRECT;
+            action = RuleAction::DIRECT;
         else
             action = check_process_rule(src_ip, src_port, dest_ip, dest_port, false, &pid);
 
-        if (action == RULE_ACTION_PROXY && is_broadcast_or_multicast(dest_ip))
-            action = RULE_ACTION_DIRECT;
+        if (action == RuleAction::PROXY && is_broadcast_or_multicast(dest_ip))
+            action = RuleAction::DIRECT;
 
         // log it if not from our own process
-        if (g_traffic_logging_enabled && g_connection_callback != NULL && (tcph->syn && !tcph->ack) && pid > 0
+        if (g_traffic_logging_enabled && g_connection_callback != nullptr && (tcph->syn && !tcph->ack) && pid > 0
             && pid != g_current_process_id)
         {
             char process_name[MAX_PROCESS_NAME];
@@ -2027,21 +2029,21 @@ static int packet_callback(struct nfq_q_handle * qh, struct nfgenmsg * nfmsg, st
                     format_ip_address(dest_ip, dest_ip_str, sizeof(dest_ip_str));
 
                     char proxy_info[300];
-                    if (action == RULE_ACTION_PROXY)
+                    if (action == RuleAction::PROXY)
                     {
                         snprintf(
                             proxy_info,
                             sizeof(proxy_info),
                             "proxy %s://%s:%d tcp",
-                            g_proxy_type == PROXY_TYPE_HTTP ? "http" : "socks5",
+                            g_proxy_type == ProxyType::HTTP ? "http" : "socks5",
                             g_proxy_host,
                             g_proxy_port);
                     }
-                    else if (action == RULE_ACTION_DIRECT)
+                    else if (action == RuleAction::DIRECT)
                     {
                         snprintf(proxy_info, sizeof(proxy_info), "direct tcp");
                     }
-                    else if (action == RULE_ACTION_BLOCK)
+                    else if (action == RuleAction::BLOCK)
                     {
                         snprintf(proxy_info, sizeof(proxy_info), "blocked tcp");
                     }
@@ -2054,52 +2056,52 @@ static int packet_callback(struct nfq_q_handle * qh, struct nfgenmsg * nfmsg, st
             }
         }
 
-        if (action == RULE_ACTION_DIRECT)
-            return nfq_set_verdict(qh, id, NF_ACCEPT, 0, NULL);
-        else if (action == RULE_ACTION_BLOCK)
-            return nfq_set_verdict(qh, id, NF_DROP, 0, NULL);
-        else if (action == RULE_ACTION_PROXY)
+        if (action == RuleAction::DIRECT)
+            return nfq_set_verdict(qh, id, NF_ACCEPT, 0, nullptr);
+        else if (action == RuleAction::BLOCK)
+            return nfq_set_verdict(qh, id, NF_DROP, 0, nullptr);
+        else if (action == RuleAction::PROXY)
         {
             // store connection info
             add_connection(src_port, src_ip, dest_ip, dest_port);
 
             // mark packet so nat table REDIRECT rule will catch it
             uint32_t mark = 1;
-            return nfq_set_verdict2(qh, id, NF_ACCEPT, mark, 0, NULL);
+            return nfq_set_verdict2(qh, id, NF_ACCEPT, mark, 0, nullptr);
         }
     }
     else if (iph->protocol == IPPROTO_UDP)
     {
         if (payload_len < (int)(iph->ihl * 4 + sizeof(struct udphdr)))
-            return nfq_set_verdict(qh, id, NF_ACCEPT, 0, NULL);
+            return nfq_set_verdict(qh, id, NF_ACCEPT, 0, nullptr);
 
         struct udphdr * udph = (struct udphdr *)(payload + iph->ihl * 4);
         src_port = ntohs(udph->source);
         dest_port = ntohs(udph->dest);
 
         if (src_port == LOCAL_UDP_RELAY_PORT)
-            return nfq_set_verdict(qh, id, NF_ACCEPT, 0, NULL);
+            return nfq_set_verdict(qh, id, NF_ACCEPT, 0, nullptr);
 
         if (is_connection_tracked(src_port))
-            return nfq_set_verdict(qh, id, NF_ACCEPT, 0, NULL);
+            return nfq_set_verdict(qh, id, NF_ACCEPT, 0, nullptr);
 
         if (dest_port == 53 && !g_dns_via_proxy)
-            action = RULE_ACTION_DIRECT;
+            action = RuleAction::DIRECT;
         else
             action = check_process_rule(src_ip, src_port, dest_ip, dest_port, true, &pid);
 
-        if (action == RULE_ACTION_PROXY && is_broadcast_or_multicast(dest_ip))
-            action = RULE_ACTION_DIRECT;
+        if (action == RuleAction::PROXY && is_broadcast_or_multicast(dest_ip))
+            action = RuleAction::DIRECT;
 
-        if (action == RULE_ACTION_PROXY && (dest_port == 67 || dest_port == 68))
-            action = RULE_ACTION_DIRECT;
+        if (action == RuleAction::PROXY && (dest_port == 67 || dest_port == 68))
+            action = RuleAction::DIRECT;
 
         // UDP proxy only works with SOCKS5, not HTTP
-        if (action == RULE_ACTION_PROXY && g_proxy_type != PROXY_TYPE_SOCKS5)
-            action = RULE_ACTION_DIRECT;
+        if (action == RuleAction::PROXY && g_proxy_type != ProxyType::SOCKS5)
+            action = RuleAction::DIRECT;
 
         // log (skip our own process, log even without PID for ephemeral UDP sockets)
-        if (g_traffic_logging_enabled && g_connection_callback != NULL && pid != g_current_process_id)
+        if (g_traffic_logging_enabled && g_connection_callback != nullptr && pid != g_current_process_id)
         {
             char process_name[MAX_PROCESS_NAME];
             uint32_t log_pid = (pid == 0) ? 1 : pid; // Use PID 1 for unknown processes
@@ -2120,15 +2122,15 @@ static int packet_callback(struct nfq_q_handle * qh, struct nfgenmsg * nfmsg, st
                 format_ip_address(dest_ip, dest_ip_str, sizeof(dest_ip_str));
 
                 char proxy_info[300];
-                if (action == RULE_ACTION_PROXY)
+                if (action == RuleAction::PROXY)
                 {
                     snprintf(proxy_info, sizeof(proxy_info), "proxy socks5://%s:%d udp", g_proxy_host, g_proxy_port);
                 }
-                else if (action == RULE_ACTION_DIRECT)
+                else if (action == RuleAction::DIRECT)
                 {
                     snprintf(proxy_info, sizeof(proxy_info), "direct udp");
                 }
-                else if (action == RULE_ACTION_BLOCK)
+                else if (action == RuleAction::BLOCK)
                 {
                     snprintf(proxy_info, sizeof(proxy_info), "blocked udp");
                 }
@@ -2140,22 +2142,22 @@ static int packet_callback(struct nfq_q_handle * qh, struct nfgenmsg * nfmsg, st
             }
         }
 
-        if (action == RULE_ACTION_DIRECT)
-            return nfq_set_verdict(qh, id, NF_ACCEPT, 0, NULL);
-        else if (action == RULE_ACTION_BLOCK)
-            return nfq_set_verdict(qh, id, NF_DROP, 0, NULL);
-        else if (action == RULE_ACTION_PROXY)
+        if (action == RuleAction::DIRECT)
+            return nfq_set_verdict(qh, id, NF_ACCEPT, 0, nullptr);
+        else if (action == RuleAction::BLOCK)
+            return nfq_set_verdict(qh, id, NF_DROP, 0, nullptr);
+        else if (action == RuleAction::PROXY)
         {
             // UDP proxy via SOCKS5 UDP ASSOCIATE
             add_connection(src_port, src_ip, dest_ip, dest_port);
 
             // Mark UDP packet for redirect to local UDP relay (port 34011)
             uint32_t mark = 2; // Use mark=2 for UDP (mark=1 is for TCP)
-            return nfq_set_verdict2(qh, id, NF_ACCEPT, mark, 0, NULL);
+            return nfq_set_verdict2(qh, id, NF_ACCEPT, mark, 0, nullptr);
         }
     }
 
-    return nfq_set_verdict(qh, id, NF_ACCEPT, 0, NULL);
+    return nfq_set_verdict(qh, id, NF_ACCEPT, 0, nullptr);
 }
 
 static void * packet_processor(void * arg)
@@ -2175,7 +2177,7 @@ static void * packet_processor(void * arg)
         // stopping the thread would break all network traffic.
     }
 
-    return NULL;
+    return nullptr;
 }
 
 static inline uint32_t connection_hash(uint16_t port)
@@ -2189,7 +2191,7 @@ static void add_connection(uint16_t src_port, uint32_t src_ip, uint32_t dest_ip,
     pthread_rwlock_wrlock(&conn_lock);
 
     CONNECTION_INFO * conn = connection_hash_table[hash];
-    while (conn != NULL)
+    while (conn != nullptr)
     {
         if (conn->src_port == src_port)
         {
@@ -2205,7 +2207,7 @@ static void add_connection(uint16_t src_port, uint32_t src_ip, uint32_t dest_ip,
     }
 
     CONNECTION_INFO * new_conn = (CONNECTION_INFO *)malloc(sizeof(CONNECTION_INFO));
-    if (new_conn != NULL)
+    if (new_conn != nullptr)
     {
         new_conn->src_port = src_port;
         new_conn->src_ip = src_ip;
@@ -2226,7 +2228,7 @@ static bool get_connection(uint16_t src_port, uint32_t * dest_ip, uint16_t * des
     pthread_rwlock_rdlock(&conn_lock);
 
     CONNECTION_INFO * conn = connection_hash_table[hash];
-    while (conn != NULL)
+    while (conn != nullptr)
     {
         if (conn->src_port == src_port && conn->is_tracked)
         {
@@ -2249,7 +2251,7 @@ static bool is_connection_tracked(uint16_t src_port)
     pthread_rwlock_rdlock(&conn_lock);
 
     CONNECTION_INFO * conn = connection_hash_table[hash];
-    while (conn != NULL)
+    while (conn != nullptr)
     {
         if (conn->src_port == src_port && conn->is_tracked)
         {
@@ -2269,7 +2271,7 @@ static void __attribute__((unused)) remove_connection(uint16_t src_port)
     pthread_rwlock_wrlock(&conn_lock);
 
     CONNECTION_INFO ** conn_ptr = &connection_hash_table[hash];
-    while (*conn_ptr != NULL)
+    while (*conn_ptr != nullptr)
     {
         if ((*conn_ptr)->src_port == src_port)
         {
@@ -2295,7 +2297,7 @@ static void cleanup_stale_connections(void)
         pthread_rwlock_wrlock(&conn_lock);
         CONNECTION_INFO ** conn_ptr = &connection_hash_table[i];
 
-        while (*conn_ptr != NULL)
+        while (*conn_ptr != nullptr)
         {
             if (now - (*conn_ptr)->last_activity > 120000) // 120 sec timeout
             {
@@ -2317,7 +2319,7 @@ static void cleanup_stale_connections(void)
     {
         pthread_mutex_lock(&pid_cache_lock);
         PID_CACHE_ENTRY ** entry_ptr = &pid_cache[i];
-        while (*entry_ptr != NULL)
+        while (*entry_ptr != nullptr)
         {
             if (now_cache - (*entry_ptr)->timestamp > 10000) // 10 sec cache TTL
             {
@@ -2337,7 +2339,7 @@ static void cleanup_stale_connections(void)
     pthread_mutex_lock(&log_lock);
     int logged_count = 0;
     LOGGED_CONNECTION * temp = logged_connections;
-    while (temp != NULL)
+    while (temp != nullptr)
     {
         logged_count++;
         temp = temp->next;
@@ -2346,15 +2348,15 @@ static void cleanup_stale_connections(void)
     if (logged_count > 100)
     {
         temp = logged_connections;
-        for (int i = 0; i < 99 && temp != NULL; i++)
+        for (int i = 0; i < 99 && temp != nullptr; i++)
         {
             temp = temp->next;
         }
-        if (temp != NULL && temp->next != NULL)
+        if (temp != nullptr && temp->next != nullptr)
         {
             LOGGED_CONNECTION * to_free = temp->next;
-            temp->next = NULL;
-            while (to_free != NULL)
+            temp->next = nullptr;
+            while (to_free != nullptr)
             {
                 LOGGED_CONNECTION * next = to_free->next;
                 free(to_free);
@@ -2370,7 +2372,7 @@ static bool is_connection_already_logged(uint32_t pid, uint32_t dest_ip, uint16_
     pthread_mutex_lock(&log_lock);
 
     LOGGED_CONNECTION * logged = logged_connections;
-    while (logged != NULL)
+    while (logged != nullptr)
     {
         if (logged->pid == pid && logged->dest_ip == dest_ip && logged->dest_port == dest_port && logged->action == action)
         {
@@ -2391,7 +2393,7 @@ static void add_logged_connection(uint32_t pid, uint32_t dest_ip, uint16_t dest_
     // keep only last 100 entries to avoid memory growth
     int count = 0;
     LOGGED_CONNECTION * temp = logged_connections;
-    while (temp != NULL && count < 100)
+    while (temp != nullptr && count < 100)
     {
         count++;
         temp = temp->next;
@@ -2400,18 +2402,18 @@ static void add_logged_connection(uint32_t pid, uint32_t dest_ip, uint16_t dest_
     if (count >= 100)
     {
         temp = logged_connections;
-        for (int i = 0; i < 98 && temp != NULL; i++)
+        for (int i = 0; i < 98 && temp != nullptr; i++)
         {
             temp = temp->next;
         }
 
-        if (temp != NULL && temp->next != NULL)
+        if (temp != nullptr && temp->next != nullptr)
         {
             LOGGED_CONNECTION * to_free_list = temp->next;
-            temp->next = NULL;
+            temp->next = nullptr;
 
             // Free excess entries (still under log_lock, but this is rare)
-            while (to_free_list != NULL)
+            while (to_free_list != nullptr)
             {
                 LOGGED_CONNECTION * next = to_free_list->next;
                 free(to_free_list);
@@ -2421,7 +2423,7 @@ static void add_logged_connection(uint32_t pid, uint32_t dest_ip, uint16_t dest_
     }
 
     LOGGED_CONNECTION * logged = (LOGGED_CONNECTION *)malloc(sizeof(LOGGED_CONNECTION));
-    if (logged != NULL)
+    if (logged != nullptr)
     {
         logged->pid = pid;
         logged->dest_ip = dest_ip;
@@ -2438,7 +2440,7 @@ static void clear_logged_connections(void)
 {
     pthread_mutex_lock(&log_lock);
 
-    while (logged_connections != NULL)
+    while (logged_connections != nullptr)
     {
         LOGGED_CONNECTION * to_free = logged_connections;
         logged_connections = logged_connections->next;
@@ -2463,7 +2465,7 @@ static uint32_t get_cached_pid(uint32_t src_ip, uint16_t src_port, bool is_udp)
     pthread_mutex_lock(&pid_cache_lock);
 
     PID_CACHE_ENTRY * entry = pid_cache[hash];
-    while (entry != NULL)
+    while (entry != nullptr)
     {
         if (entry->src_ip == src_ip && entry->src_port == src_port && entry->is_udp == is_udp)
         {
@@ -2492,7 +2494,7 @@ static void cache_pid(uint32_t src_ip, uint16_t src_port, uint32_t pid, bool is_
     pthread_mutex_lock(&pid_cache_lock);
 
     PID_CACHE_ENTRY * entry = pid_cache[hash];
-    while (entry != NULL)
+    while (entry != nullptr)
     {
         if (entry->src_ip == src_ip && entry->src_port == src_port && entry->is_udp == is_udp)
         {
@@ -2505,7 +2507,7 @@ static void cache_pid(uint32_t src_ip, uint16_t src_port, uint32_t pid, bool is_
     }
 
     PID_CACHE_ENTRY * new_entry = (PID_CACHE_ENTRY *)malloc(sizeof(PID_CACHE_ENTRY));
-    if (new_entry != NULL)
+    if (new_entry != nullptr)
     {
         new_entry->src_ip = src_ip;
         new_entry->src_port = src_port;
@@ -2525,7 +2527,7 @@ static void clear_pid_cache(void)
 
     for (int i = 0; i < PID_CACHE_SIZE; i++)
     {
-        while (pid_cache[i] != NULL)
+        while (pid_cache[i] != nullptr)
         {
             PID_CACHE_ENTRY * to_free = pid_cache[i];
             pid_cache[i] = pid_cache[i]->next;
@@ -2547,14 +2549,14 @@ static void * cleanup_worker(void * arg)
             cleanup_stale_connections();
         }
     }
-    return NULL;
+    return nullptr;
 }
 
 static void update_has_active_rules(void)
 {
     g_has_active_rules = false;
     PROCESS_RULE * rule = rules_list;
-    while (rule != NULL)
+    while (rule != nullptr)
     {
         if (rule->enabled)
         {
@@ -2565,14 +2567,14 @@ static void update_has_active_rules(void)
     }
 }
 
-uint32_t ProxyPrism_AddRule(
+uint32_t add_rule(
     const char * process_name, const char * target_hosts, const char * target_ports, RuleProtocol protocol, RuleAction action)
 {
-    if (process_name == NULL || process_name[0] == '\0')
+    if (process_name == nullptr || process_name[0] == '\0')
         return 0;
 
     PROCESS_RULE * rule = (PROCESS_RULE *)malloc(sizeof(PROCESS_RULE));
-    if (rule == NULL)
+    if (rule == nullptr)
         return 0;
 
     rule->rule_id = g_next_rule_id++;
@@ -2580,10 +2582,10 @@ uint32_t ProxyPrism_AddRule(
     rule->process_name[MAX_PROCESS_NAME - 1] = '\0';
     rule->protocol = protocol;
 
-    if (target_hosts != NULL && target_hosts[0] != '\0')
+    if (target_hosts != nullptr && target_hosts[0] != '\0')
     {
         rule->target_hosts = strdup(target_hosts);
-        if (rule->target_hosts == NULL)
+        if (rule->target_hosts == nullptr)
         {
             free(rule);
             return 0;
@@ -2592,17 +2594,17 @@ uint32_t ProxyPrism_AddRule(
     else
     {
         rule->target_hosts = strdup("*");
-        if (rule->target_hosts == NULL)
+        if (rule->target_hosts == nullptr)
         {
             free(rule);
             return 0;
         }
     }
 
-    if (target_ports != NULL && target_ports[0] != '\0')
+    if (target_ports != nullptr && target_ports[0] != '\0')
     {
         rule->target_ports = strdup(target_ports);
-        if (rule->target_ports == NULL)
+        if (rule->target_ports == nullptr)
         {
             free(rule->target_hosts);
             free(rule);
@@ -2612,7 +2614,7 @@ uint32_t ProxyPrism_AddRule(
     else
     {
         rule->target_ports = strdup("*");
-        if (rule->target_ports == NULL)
+        if (rule->target_ports == nullptr)
         {
             free(rule->target_hosts);
             free(rule);
@@ -2634,14 +2636,14 @@ uint32_t ProxyPrism_AddRule(
     return rule->rule_id;
 }
 
-bool ProxyPrism_EnableRule(uint32_t rule_id)
+bool enable_rule(uint32_t rule_id)
 {
     if (rule_id == 0)
         return false;
 
     pthread_rwlock_wrlock(&rules_lock);
     PROCESS_RULE * rule = rules_list;
-    while (rule != NULL)
+    while (rule != nullptr)
     {
         if (rule->rule_id == rule_id)
         {
@@ -2657,14 +2659,14 @@ bool ProxyPrism_EnableRule(uint32_t rule_id)
     return false;
 }
 
-bool ProxyPrism_DisableRule(uint32_t rule_id)
+bool disable_rule(uint32_t rule_id)
 {
     if (rule_id == 0)
         return false;
 
     pthread_rwlock_wrlock(&rules_lock);
     PROCESS_RULE * rule = rules_list;
-    while (rule != NULL)
+    while (rule != nullptr)
     {
         if (rule->rule_id == rule_id)
         {
@@ -2680,20 +2682,20 @@ bool ProxyPrism_DisableRule(uint32_t rule_id)
     return false;
 }
 
-bool ProxyPrism_DeleteRule(uint32_t rule_id)
+bool delete_rule(uint32_t rule_id)
 {
     if (rule_id == 0)
         return false;
 
     pthread_rwlock_wrlock(&rules_lock);
     PROCESS_RULE * rule = rules_list;
-    PROCESS_RULE * prev = NULL;
+    PROCESS_RULE * prev = nullptr;
 
-    while (rule != NULL)
+    while (rule != nullptr)
     {
         if (rule->rule_id == rule_id)
         {
-            if (prev == NULL)
+            if (prev == nullptr)
                 rules_list = rule->next;
             else
                 prev->next = rule->next;
@@ -2701,9 +2703,9 @@ bool ProxyPrism_DeleteRule(uint32_t rule_id)
             update_has_active_rules();
             pthread_rwlock_unlock(&rules_lock);
 
-            if (rule->target_hosts != NULL)
+            if (rule->target_hosts != nullptr)
                 free(rule->target_hosts);
-            if (rule->target_ports != NULL)
+            if (rule->target_ports != nullptr)
                 free(rule->target_ports);
             free(rule);
 
@@ -2717,7 +2719,7 @@ bool ProxyPrism_DeleteRule(uint32_t rule_id)
     return false;
 }
 
-bool ProxyPrism_EditRule(
+bool edit_rule(
     uint32_t rule_id,
     const char * process_name,
     const char * target_hosts,
@@ -2725,13 +2727,13 @@ bool ProxyPrism_EditRule(
     RuleProtocol protocol,
     RuleAction action)
 {
-    if (rule_id == 0 || process_name == NULL || target_hosts == NULL || target_ports == NULL)
+    if (rule_id == 0 || process_name == nullptr || target_hosts == nullptr || target_ports == nullptr)
         return false;
 
     // Pre-allocate new strings before taking lock to minimize hold time
     char * new_hosts = strdup(target_hosts);
     char * new_ports = strdup(target_ports);
-    if (new_hosts == NULL || new_ports == NULL)
+    if (new_hosts == nullptr || new_ports == nullptr)
     {
         free(new_hosts);
         free(new_ports);
@@ -2740,7 +2742,7 @@ bool ProxyPrism_EditRule(
 
     pthread_rwlock_wrlock(&rules_lock);
     PROCESS_RULE * rule = rules_list;
-    while (rule != NULL)
+    while (rule != nullptr)
     {
         if (rule->rule_id == rule_id)
         {
@@ -2771,9 +2773,9 @@ bool ProxyPrism_EditRule(
     return false;
 }
 
-bool ProxyPrism_SetProxyConfig(ProxyType type, const char * proxy_ip, uint16_t proxy_port, const char * username, const char * password)
+bool set_proxy_config(ProxyType type, const char * proxy_ip, uint16_t proxy_port, const char * username, const char * password)
 {
-    if (proxy_ip == NULL || proxy_ip[0] == '\0' || proxy_port == 0)
+    if (proxy_ip == nullptr || proxy_ip[0] == '\0' || proxy_port == 0)
         return false;
 
     g_proxy_ip_cached = resolve_hostname(proxy_ip);
@@ -2783,9 +2785,9 @@ bool ProxyPrism_SetProxyConfig(ProxyType type, const char * proxy_ip, uint16_t p
     strncpy(g_proxy_host, proxy_ip, sizeof(g_proxy_host) - 1);
     g_proxy_host[sizeof(g_proxy_host) - 1] = '\0';
     g_proxy_port = proxy_port;
-    g_proxy_type = (type == PROXY_TYPE_HTTP) ? PROXY_TYPE_HTTP : PROXY_TYPE_SOCKS5;
+    g_proxy_type = (type == ProxyType::HTTP) ? ProxyType::HTTP : ProxyType::SOCKS5;
 
-    if (username != NULL)
+    if (username != nullptr)
     {
         strncpy(g_proxy_username, username, sizeof(g_proxy_username) - 1);
         g_proxy_username[sizeof(g_proxy_username) - 1] = '\0';
@@ -2795,7 +2797,7 @@ bool ProxyPrism_SetProxyConfig(ProxyType type, const char * proxy_ip, uint16_t p
         g_proxy_username[0] = '\0';
     }
 
-    if (password != NULL)
+    if (password != nullptr)
     {
         strncpy(g_proxy_password, password, sizeof(g_proxy_password) - 1);
         g_proxy_password[sizeof(g_proxy_password) - 1] = '\0';
@@ -2805,37 +2807,37 @@ bool ProxyPrism_SetProxyConfig(ProxyType type, const char * proxy_ip, uint16_t p
         g_proxy_password[0] = '\0';
     }
 
-    log_message("proxy configured %s %s:%d", type == PROXY_TYPE_HTTP ? "http" : "socks5", proxy_ip, proxy_port);
+    log_message("proxy configured %s %s:%d", type == ProxyType::HTTP ? "http" : "socks5", proxy_ip, proxy_port);
     return true;
 }
 
-void ProxyPrism_SetDnsViaProxy(bool enable)
+void set_dns_via_proxy(bool enable)
 {
     g_dns_via_proxy = enable;
     log_message("dns via proxy %s", enable ? "enabled" : "disabled");
 }
 
-void ProxyPrism_SetLogCallback(LogCallback callback)
+void set_log_callback(LogCallback callback)
 {
     g_log_callback = callback;
 }
 
-void ProxyPrism_SetConnectionCallback(ConnectionCallback callback)
+void set_connection_callback(ConnectionCallback callback)
 {
     g_connection_callback = callback;
 }
 
-void ProxyPrism_SetTrafficLoggingEnabled(bool enable)
+void set_traffic_logging_enabled(bool enable)
 {
     g_traffic_logging_enabled = enable;
 }
 
-void ProxyPrism_ClearConnectionLogs(void)
+void clear_connection_logs(void)
 {
     clear_logged_connections();
 }
 
-bool ProxyPrism_Start(void)
+bool start(void)
 {
     if (running)
         return false;
@@ -2862,25 +2864,25 @@ bool ProxyPrism_Start(void)
         fclose(fp);
     } // 4MB
 
-    if (pthread_create(&proxy_thread, NULL, local_proxy_server, NULL) != 0)
+    if (pthread_create(&proxy_thread, nullptr, local_proxy_server, nullptr) != 0)
     {
         running = false;
         return false;
     }
 
-    if (pthread_create(&cleanup_thread, NULL, cleanup_worker, NULL) != 0)
+    if (pthread_create(&cleanup_thread, nullptr, cleanup_worker, nullptr) != 0)
     {
         running = false;
         pthread_cancel(proxy_thread);
-        pthread_join(proxy_thread, NULL);
+        pthread_join(proxy_thread, nullptr);
         proxy_thread = 0;
         return false;
     }
 
     // Start UDP relay server if SOCKS5 proxy
-    if (g_proxy_type == PROXY_TYPE_SOCKS5)
+    if (g_proxy_type == ProxyType::SOCKS5)
     {
-        if (pthread_create(&udp_relay_thread, NULL, udp_relay_server, NULL) != 0)
+        if (pthread_create(&udp_relay_thread, nullptr, udp_relay_server, nullptr) != 0)
         {
             log_message("failed to create UDP relay thread");
         }
@@ -2904,16 +2906,16 @@ bool ProxyPrism_Start(void)
     {
         log_message("nfq_bind_pf failed");
         nfq_close(nfq_h);
-        nfq_h = NULL;
+        nfq_h = nullptr;
         goto start_fail;
     }
 
-    nfq_qh = nfq_create_queue(nfq_h, 0, &packet_callback, NULL);
+    nfq_qh = nfq_create_queue(nfq_h, 0, &packet_callback, nullptr);
     if (!nfq_qh)
     {
         log_message("nfq_create_queue failed");
         nfq_close(nfq_h);
-        nfq_h = NULL;
+        nfq_h = nullptr;
         goto start_fail;
     }
 
@@ -2921,9 +2923,9 @@ bool ProxyPrism_Start(void)
     {
         log_message("nfq_set_mode failed");
         nfq_destroy_queue(nfq_qh);
-        nfq_qh = NULL;
+        nfq_qh = nullptr;
         nfq_close(nfq_h);
-        nfq_h = NULL;
+        nfq_h = nullptr;
         goto start_fail;
     }
 
@@ -2933,8 +2935,8 @@ bool ProxyPrism_Start(void)
     // setup iptables rules for packet interception - USE MANGLE table so it runs BEFORE nat
     log_message("setting up iptables rules");
     // mangle table runs before nat, so we can mark packets there
-    ret1 = run_iptables_cmd("-t", "mangle", "-A", "OUTPUT", "-p", "tcp", "-j", "NFQUEUE", "--queue-num", "0", NULL, NULL, NULL, NULL);
-    ret2 = run_iptables_cmd("-t", "mangle", "-A", "OUTPUT", "-p", "udp", "-j", "NFQUEUE", "--queue-num", "0", NULL, NULL, NULL, NULL);
+    ret1 = run_iptables_cmd("-t", "mangle", "-A", "OUTPUT", "-p", "tcp", "-j", "NFQUEUE", "--queue-num", "0", nullptr, nullptr, nullptr, nullptr);
+    ret2 = run_iptables_cmd("-t", "mangle", "-A", "OUTPUT", "-p", "udp", "-j", "NFQUEUE", "--queue-num", "0", nullptr, nullptr, nullptr, nullptr);
 
     if (ret1 != 0 || ret2 != 0)
     {
@@ -2958,7 +2960,7 @@ bool ProxyPrism_Start(void)
 
     for (int i = 0; i < NUM_PACKET_THREADS; i++)
     {
-        if (pthread_create(&packet_thread[i], NULL, packet_processor, NULL) != 0)
+        if (pthread_create(&packet_thread[i], nullptr, packet_processor, nullptr) != 0)
         {
             log_message("failed to create packet thread %d", i);
         }
@@ -2972,25 +2974,25 @@ start_fail:
     if (proxy_thread != 0)
     {
         pthread_cancel(proxy_thread);
-        pthread_join(proxy_thread, NULL);
+        pthread_join(proxy_thread, nullptr);
         proxy_thread = 0;
     }
     if (cleanup_thread != 0)
     {
         pthread_cancel(cleanup_thread);
-        pthread_join(cleanup_thread, NULL);
+        pthread_join(cleanup_thread, nullptr);
         cleanup_thread = 0;
     }
     if (udp_relay_thread != 0)
     {
         pthread_cancel(udp_relay_thread);
-        pthread_join(udp_relay_thread, NULL);
+        pthread_join(udp_relay_thread, nullptr);
         udp_relay_thread = 0;
     }
     return false;
 }
 
-bool ProxyPrism_Stop(void)
+bool stop(void)
 {
     if (!running)
         return false;
@@ -2998,8 +3000,8 @@ bool ProxyPrism_Stop(void)
     running = false;
 
     // cleanup iptables
-    int ret1 = run_iptables_cmd("-t", "mangle", "-D", "OUTPUT", "-p", "tcp", "-j", "NFQUEUE", "--queue-num", "0", NULL, NULL, NULL, NULL);
-    int ret2 = run_iptables_cmd("-t", "mangle", "-D", "OUTPUT", "-p", "udp", "-j", "NFQUEUE", "--queue-num", "0", NULL, NULL, NULL, NULL);
+    int ret1 = run_iptables_cmd("-t", "mangle", "-D", "OUTPUT", "-p", "tcp", "-j", "NFQUEUE", "--queue-num", "0", nullptr, nullptr, nullptr, nullptr);
+    int ret2 = run_iptables_cmd("-t", "mangle", "-D", "OUTPUT", "-p", "udp", "-j", "NFQUEUE", "--queue-num", "0", nullptr, nullptr, nullptr, nullptr);
     int ret3
         = run_iptables_cmd("-t", "nat", "-D", "OUTPUT", "-p", "tcp", "-m", "mark", "--mark", "1", "-j", "REDIRECT", "--to-port", "34010");
     int ret4
@@ -3014,7 +3016,7 @@ bool ProxyPrism_Stop(void)
         if (packet_thread[i] != 0)
         {
             pthread_cancel(packet_thread[i]);
-            pthread_join(packet_thread[i], NULL);
+            pthread_join(packet_thread[i], nullptr);
             packet_thread[i] = 0;
         }
     }
@@ -3022,33 +3024,33 @@ bool ProxyPrism_Stop(void)
     if (nfq_qh)
     {
         nfq_destroy_queue(nfq_qh);
-        nfq_qh = NULL;
+        nfq_qh = nullptr;
     }
 
     if (nfq_h)
     {
         nfq_close(nfq_h);
-        nfq_h = NULL;
+        nfq_h = nullptr;
     }
 
     if (proxy_thread != 0)
     {
         pthread_cancel(proxy_thread);
-        pthread_join(proxy_thread, NULL);
+        pthread_join(proxy_thread, nullptr);
         proxy_thread = 0;
     }
 
     if (udp_relay_thread != 0)
     {
         pthread_cancel(udp_relay_thread);
-        pthread_join(udp_relay_thread, NULL);
+        pthread_join(udp_relay_thread, nullptr);
         udp_relay_thread = 0;
     }
 
     if (cleanup_thread != 0)
     {
         pthread_cancel(cleanup_thread);
-        pthread_join(cleanup_thread, NULL);
+        pthread_join(cleanup_thread, nullptr);
         cleanup_thread = 0;
     }
 
@@ -3056,7 +3058,7 @@ bool ProxyPrism_Stop(void)
     pthread_rwlock_wrlock(&conn_lock);
     for (int i = 0; i < CONNECTION_HASH_SIZE; i++)
     {
-        while (connection_hash_table[i] != NULL)
+        while (connection_hash_table[i] != nullptr)
         {
             CONNECTION_INFO * to_free = connection_hash_table[i];
             connection_hash_table[i] = connection_hash_table[i]->next;
@@ -3067,7 +3069,7 @@ bool ProxyPrism_Stop(void)
 
     // Free all rules
     pthread_rwlock_wrlock(&rules_lock);
-    while (rules_list != NULL)
+    while (rules_list != nullptr)
     {
         PROCESS_RULE * to_free = rules_list;
         rules_list = rules_list->next;
@@ -3086,7 +3088,7 @@ bool ProxyPrism_Stop(void)
     return true;
 }
 
-int ProxyPrism_TestConnection(const char * target_host, uint16_t target_port, char * result_buffer, size_t buffer_size)
+int test_connection(const char * target_host, uint16_t target_port, char * result_buffer, size_t buffer_size)
 {
     int test_sock = -1;
     struct sockaddr_in proxy_addr;
@@ -3100,7 +3102,7 @@ int ProxyPrism_TestConnection(const char * target_host, uint16_t target_port, ch
         return -1;
     }
 
-    if (target_host == NULL || target_host[0] == '\0')
+    if (target_host == nullptr || target_host[0] == '\0')
     {
         snprintf(result_buffer, buffer_size, "error invalid target host");
         return -1;
@@ -3112,7 +3114,7 @@ int ProxyPrism_TestConnection(const char * target_host, uint16_t target_port, ch
         "testing connection to %s:%d via %s proxy %s:%d\n",
         target_host,
         target_port,
-        g_proxy_type == PROXY_TYPE_HTTP ? "http" : "socks5",
+        g_proxy_type == ProxyType::HTTP ? "http" : "socks5",
         g_proxy_host,
         g_proxy_port);
     strncpy(result_buffer, temp_buffer, buffer_size - 1);
@@ -3122,7 +3124,7 @@ int ProxyPrism_TestConnection(const char * target_host, uint16_t target_port, ch
     memset(&hints, 0, sizeof(hints));
     hints.ai_family = AF_INET;
     hints.ai_socktype = SOCK_STREAM;
-    int gai_ret = getaddrinfo(target_host, NULL, &hints, &res);
+    int gai_ret = getaddrinfo(target_host, nullptr, &hints, &res);
     if (gai_ret != 0)
     {
         snprintf(temp_buffer, sizeof(temp_buffer), "error failed to resolve hostname %s: %s\n", target_host, gai_strerror(gai_ret));
@@ -3171,7 +3173,7 @@ int ProxyPrism_TestConnection(const char * target_host, uint16_t target_port, ch
 
     strncat(result_buffer, "connected to proxy server\n", buffer_size - strlen(result_buffer) - 1);
 
-    if (g_proxy_type == PROXY_TYPE_SOCKS5)
+    if (g_proxy_type == ProxyType::SOCKS5)
     {
         if (socks5_connect(test_sock, target_ip, target_port) != 0)
         {
@@ -3220,11 +3222,11 @@ int ProxyPrism_TestConnection(const char * target_host, uint16_t target_port, ch
     {
         response[bytes_received] = '\0';
 
-        if (strstr(response, "HTTP/") != NULL)
+        if (strstr(response, "HTTP/") != nullptr)
         {
             char * status_line = strstr(response, "HTTP/");
             int status_code = 0;
-            if (status_line != NULL)
+            if (status_line != nullptr)
             {
                 sscanf(status_line, "HTTP/%*s %d", &status_code);
             }
@@ -3267,15 +3269,17 @@ __attribute__((destructor)) static void library_cleanup(void)
     if (running)
     {
         log_message("library unloading - cleaning up automatically");
-        ProxyPrism_Stop();
+        stop();
     }
     else
     {
         // Even if not running, ensure iptables rules are removed
         // This handles cases where the app crashed before calling Stop
-        run_iptables_cmd("-t", "mangle", "-D", "OUTPUT", "-p", "tcp", "-j", "NFQUEUE", "--queue-num", "0", NULL, NULL, NULL, NULL);
-        run_iptables_cmd("-t", "mangle", "-D", "OUTPUT", "-p", "udp", "-j", "NFQUEUE", "--queue-num", "0", NULL, NULL, NULL, NULL);
+        run_iptables_cmd("-t", "mangle", "-D", "OUTPUT", "-p", "tcp", "-j", "NFQUEUE", "--queue-num", "0", nullptr, nullptr, nullptr, nullptr);
+        run_iptables_cmd("-t", "mangle", "-D", "OUTPUT", "-p", "udp", "-j", "NFQUEUE", "--queue-num", "0", nullptr, nullptr, nullptr, nullptr);
         run_iptables_cmd("-t", "nat", "-D", "OUTPUT", "-p", "tcp", "-m", "mark", "--mark", "1", "-j", "REDIRECT", "--to-port", "34010");
         run_iptables_cmd("-t", "nat", "-D", "OUTPUT", "-p", "udp", "-m", "mark", "--mark", "2", "-j", "REDIRECT", "--to-port", "34011");
     }
 }
+
+} // namespace proxyprism

@@ -1,64 +1,87 @@
-#ifndef PROXYPRISM_H
-#define PROXYPRISM_H
+#pragma once
 
-#define PROXYPRISM_VERSION "0.1.0"
+#include <cstddef>
+#include <cstdint>
+#include <functional>
 
-#include <stdbool.h>
-#include <stddef.h>
-#include <stdint.h>
+namespace proxyprism {
 
-#ifdef __cplusplus
-extern "C" {
-#endif
+inline constexpr const char* version = "0.1.0";
 
-typedef void (*LogCallback)(const char * message);
-typedef void (*ConnectionCallback)(
-    const char * process_name, uint32_t pid, const char * dest_ip, uint16_t dest_port, const char * proxy_info);
+using RuleId = std::uint32_t;
 
-typedef enum
+enum class ProxyType : std::uint8_t
 {
-    PROXY_TYPE_HTTP = 0,
-    PROXY_TYPE_SOCKS5 = 1
-} ProxyType;
+    HTTP = 0,
+    SOCKS5 = 1,
+};
 
-typedef enum
+enum class RuleAction : std::uint8_t
 {
-    RULE_ACTION_PROXY = 0,
-    RULE_ACTION_DIRECT = 1,
-    RULE_ACTION_BLOCK = 2
-} RuleAction;
+    PROXY = 0,
+    DIRECT = 1,
+    BLOCK = 2,
+};
 
-typedef enum
+enum class RuleProtocol : std::uint8_t
 {
-    RULE_PROTOCOL_TCP = 0,
-    RULE_PROTOCOL_UDP = 1,
-    RULE_PROTOCOL_BOTH = 2
-} RuleProtocol;
+    TCP = 0,
+    UDP = 1,
+    BOTH = 2,
+};
 
-uint32_t ProxyPrism_AddRule(
-    const char * process_name, const char * target_hosts, const char * target_ports, RuleProtocol protocol, RuleAction action);
-bool ProxyPrism_EnableRule(uint32_t rule_id);
-bool ProxyPrism_DisableRule(uint32_t rule_id);
-bool ProxyPrism_DeleteRule(uint32_t rule_id);
-bool ProxyPrism_EditRule(
-    uint32_t rule_id,
-    const char * process_name,
-    const char * target_hosts,
-    const char * target_ports,
+using LogCallback = std::function<void(const char* message)>;
+using ConnectionCallback = std::function<void(
+    const char* process_name,
+    std::uint32_t pid,
+    const char* dest_ip,
+    std::uint16_t dest_port,
+    const char* proxy_info)>;
+
+RuleId add_rule(
+    const char* process_name,
+    const char* target_hosts,
+    const char* target_ports,
     RuleProtocol protocol,
     RuleAction action);
-bool ProxyPrism_SetProxyConfig(ProxyType type, const char * proxy_ip, uint16_t proxy_port, const char * username, const char * password);
-void ProxyPrism_SetDnsViaProxy(bool enable);
-void ProxyPrism_SetLogCallback(LogCallback callback);
-void ProxyPrism_SetConnectionCallback(ConnectionCallback callback);
-void ProxyPrism_SetTrafficLoggingEnabled(bool enable);
-void ProxyPrism_ClearConnectionLogs(void);
-bool ProxyPrism_Start(void);
-bool ProxyPrism_Stop(void);
-int ProxyPrism_TestConnection(const char * target_host, uint16_t target_port, char * result_buffer, size_t buffer_size);
 
-#ifdef __cplusplus
-}
-#endif
+bool enable_rule(RuleId rule_id);
+bool disable_rule(RuleId rule_id);
+bool delete_rule(RuleId rule_id);
 
-#endif
+bool edit_rule(
+    RuleId rule_id,
+    const char* process_name,
+    const char* target_hosts,
+    const char* target_ports,
+    RuleProtocol protocol,
+    RuleAction action);
+
+bool set_proxy_config(
+    ProxyType type,
+    const char* proxy_ip,
+    std::uint16_t proxy_port,
+    const char* username,
+    const char* password);
+
+void set_dns_via_proxy(bool enable);
+
+void set_log_callback(LogCallback callback);
+
+void set_connection_callback(ConnectionCallback callback);
+
+void set_traffic_logging_enabled(bool enable);
+
+void clear_connection_logs();
+
+bool start();
+
+bool stop();
+
+int test_connection(
+    const char* target_host,
+    std::uint16_t target_port,
+    char* result_buffer,
+    std::size_t buffer_size);
+
+} // namespace proxyprism

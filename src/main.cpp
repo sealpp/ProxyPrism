@@ -1,25 +1,26 @@
-#include <ctype.h>
-#include <signal.h>
-#include <stdbool.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
+#include <cctype>
+#include <csignal>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
 #include <unistd.h>
 #include "ProxyPrism.h"
 #include "tomlc17.h"
 
-#define MAX_RULES 100
-#define MAX_RULE_STR 1024
-#define DEFAULT_CONFIG_PATH "/etc/proxyprism.conf"
+using namespace proxyprism;
 
-typedef struct
+constexpr int MAX_RULES = 100;
+constexpr int MAX_RULE_STR = 1024;
+constexpr const char* DEFAULT_CONFIG_PATH = "/etc/proxyprism.conf";
+
+struct ProxyRule
 {
     char process_name[256];
     char target_hosts[256];
     char target_ports[256];
     RuleProtocol protocol;
     RuleAction action;
-} ProxyRule;
+};
 
 static volatile bool keep_running = false;
 static int verbose_level = 0;
@@ -47,7 +48,7 @@ static void signal_handler(int sig)
         printf("\n\n=== CLI CRASH DETECTED ===\n");
         printf("Signal: %d (%s)\n", sig, sig == SIGSEGV ? "SEGFAULT" : sig == SIGABRT ? "ABORT" : "BUS ERROR");
         printf("Calling emergency cleanup...\n");
-        ProxyPrism_Stop();
+        stop();
         _exit(1);
     }
 
@@ -145,11 +146,11 @@ static RuleProtocol parse_protocol(const char * str)
     upper[strlen(str) < 15 ? strlen(str) : 15] = '\0';
 
     if (strcmp(upper, "TCP") == 0)
-        return RULE_PROTOCOL_TCP;
+        return RuleProtocol::TCP;
     else if (strcmp(upper, "UDP") == 0)
-        return RULE_PROTOCOL_UDP;
+        return RuleProtocol::UDP;
     else if (strcmp(upper, "BOTH") == 0)
-        return RULE_PROTOCOL_BOTH;
+        return RuleProtocol::BOTH;
     else
     {
         fprintf(stderr, "ERROR: Invalid protocol '%s'. Use TCP, UDP, or BOTH\n", str);
@@ -165,11 +166,11 @@ static RuleAction parse_action(const char * str)
     upper[strlen(str) < 15 ? strlen(str) : 15] = '\0';
 
     if (strcmp(upper, "PROXY") == 0)
-        return RULE_ACTION_PROXY;
+        return RuleAction::PROXY;
     else if (strcmp(upper, "DIRECT") == 0)
-        return RULE_ACTION_DIRECT;
+        return RuleAction::DIRECT;
     else if (strcmp(upper, "BLOCK") == 0)
-        return RULE_ACTION_BLOCK;
+        return RuleAction::BLOCK;
     else
     {
         fprintf(stderr, "ERROR: Invalid action '%s'. Use PROXY, DIRECT, or BLOCK\n", str);
@@ -189,7 +190,7 @@ static void default_if_empty(char * dest, const char * src, const char * default
         return;
     }
 
-    if (src == NULL || src[0] == '\0' || strcmp(src, " ") == 0)
+    if (src == nullptr || src[0] == '\0' || strcmp(src, " ") == 0)
         strncpy(dest, default_val, dest_size - 1);
     else
         strncpy(dest, src, dest_size - 1);
@@ -202,14 +203,14 @@ static bool parse_rule(const char * rule_str, ProxyRule * rule)
     strncpy(buffer, rule_str, sizeof(buffer) - 1);
     buffer[sizeof(buffer) - 1] = '\0';
 
-    char * parts[5] = {NULL, NULL, NULL, NULL, NULL};
+    char * parts[5] = {nullptr, nullptr, nullptr, nullptr, nullptr};
     int part_idx = 0;
     char * token = strtok(buffer, ":");
 
-    while (token != NULL && part_idx < 5)
+    while (token != nullptr && part_idx < 5)
     {
         parts[part_idx++] = token;
-        token = strtok(NULL, ":");
+        token = strtok(nullptr, ":");
     }
 
     if (part_idx != 5)
@@ -240,7 +241,7 @@ static bool parse_proxy_url(const char * url, ProxyType * type, char * host, uin
 
     // parse type://
     char * scheme_end = strstr(buffer, "://");
-    if (scheme_end == NULL)
+    if (scheme_end == nullptr)
     {
         fprintf(stderr, "ERROR: Invalid proxy URL format. Expected type://host:port\n");
         return false;
@@ -256,9 +257,9 @@ static bool parse_proxy_url(const char * url, ProxyType * type, char * host, uin
     upper_scheme[strlen(scheme) < 15 ? strlen(scheme) : 15] = '\0';
 
     if (strcmp(upper_scheme, "SOCKS5") == 0)
-        *type = PROXY_TYPE_SOCKS5;
+        *type = ProxyType::SOCKS5;
     else if (strcmp(upper_scheme, "HTTP") == 0)
-        *type = PROXY_TYPE_HTTP;
+        *type = ProxyType::HTTP;
     else
     {
         fprintf(stderr, "ERROR: Invalid proxy type '%s'. Use 'socks5' or 'http'\n", scheme);
@@ -269,10 +270,10 @@ static bool parse_proxy_url(const char * url, ProxyType * type, char * host, uin
     char * parts[4];
     int num_parts = 0;
     char * token = strtok(rest, ":");
-    while (token != NULL && num_parts < 4)
+    while (token != nullptr && num_parts < 4)
     {
         parts[num_parts++] = token;
-        token = strtok(NULL, ":");
+        token = strtok(nullptr, ":");
     }
 
     if (num_parts < 2)
@@ -321,12 +322,12 @@ static bool toml_get_bool(toml_datum_t table, const char * key, bool * out)
 static const char * toml_string_ptr(toml_datum_t d)
 {
     if (d.type != TOML_STRING)
-        return NULL;
-    if (d.u.s != NULL)
+        return nullptr;
+    if (d.u.s != nullptr)
         return d.u.s;
-    if (d.u.str.ptr != NULL)
+    if (d.u.str.ptr != nullptr)
         return d.u.str.ptr;
-    return NULL;
+    return nullptr;
 }
 
 static bool join_array_to_string(toml_datum_t arr, char * out, size_t out_size, char sep)
@@ -341,7 +342,7 @@ static bool join_array_to_string(toml_datum_t arr, char * out, size_t out_size, 
     {
         toml_datum_t elem = arr.u.arr.elem[i];
         const char * s = toml_string_ptr(elem);
-        if (s == NULL)
+        if (s == nullptr)
             continue;
 
         if (i > 0)
@@ -379,7 +380,7 @@ static void get_rule_field(toml_datum_t rule, const char * key, char * out, size
     if (d.type == TOML_STRING)
     {
         const char * s = toml_string_ptr(d);
-        if (s == NULL)
+        if (s == nullptr)
             s = "";
         default_if_empty(out, s, default_val, out_size);
     }
@@ -419,7 +420,7 @@ static bool load_config(
     if (proxy.type == TOML_STRING)
     {
         const char * s = toml_string_ptr(proxy);
-        if (s != NULL && s[0] != '\0')
+        if (s != nullptr && s[0] != '\0')
         {
             strncpy(proxy_url, s, proxy_url_size - 1);
             proxy_url[proxy_url_size - 1] = '\0';
@@ -498,7 +499,7 @@ int main(int argc, char * argv[])
         if (strcmp(argv[i], "--cleanup") == 0)
         {
             printf("Running cleanup...\n");
-            ProxyPrism_Stop();
+            stop();
             printf("Cleanup complete.\n");
             return 0;
         }
@@ -632,7 +633,7 @@ int main(int argc, char * argv[])
     // without touching iptables, nfqueue, or the network.
     if (check_config)
     {
-        printf("Proxy: %s://%s:%u\n", proxy_type == PROXY_TYPE_HTTP ? "http" : "socks5", proxy_host, proxy_port);
+        printf("Proxy: %s://%s:%u\n", proxy_type == ProxyType::HTTP ? "http" : "socks5", proxy_host, proxy_port);
 
         if (proxy_username[0] != '\0')
             printf("Proxy Auth: %s:***\n", proxy_username);
@@ -644,11 +645,11 @@ int main(int argc, char * argv[])
             printf("Rules: %d\n", num_rules);
             for (int i = 0; i < num_rules; i++)
             {
-                const char * protocol_str = rules[i].protocol == RULE_PROTOCOL_TCP ? "TCP"
-                    : rules[i].protocol == RULE_PROTOCOL_UDP                       ? "UDP"
+                const char * protocol_str = rules[i].protocol == RuleProtocol::TCP ? "TCP"
+                    : rules[i].protocol == RuleProtocol::UDP                       ? "UDP"
                                                                                    : "BOTH";
-                const char * action_str = rules[i].action == RULE_ACTION_PROXY ? "PROXY"
-                    : rules[i].action == RULE_ACTION_DIRECT                    ? "DIRECT"
+                const char * action_str = rules[i].action == RuleAction::PROXY ? "PROXY"
+                    : rules[i].action == RuleAction::DIRECT                    ? "DIRECT"
                                                                                : "BLOCK";
 
                 printf(
@@ -682,20 +683,20 @@ int main(int argc, char * argv[])
     // 0=nothing 1=logs 2=connections 3=both
 
     if (verbose_level == 1 || verbose_level == 3)
-        ProxyPrism_SetLogCallback(log_callback);
+        set_log_callback(log_callback);
     else
-        ProxyPrism_SetLogCallback(NULL); // Explicitly disable
+        set_log_callback(nullptr); // Explicitly disable
 
     if (verbose_level == 2 || verbose_level == 3)
-        ProxyPrism_SetConnectionCallback(connection_callback);
+        set_connection_callback(connection_callback);
     else
-        ProxyPrism_SetConnectionCallback(NULL); // Explicitly disable
+        set_connection_callback(nullptr); // Explicitly disable
 
     // turn on traffic logging when needed
-    ProxyPrism_SetTrafficLoggingEnabled(verbose_level > 0);
+    set_traffic_logging_enabled(verbose_level > 0);
 
     // show config
-    printf("Proxy: %s://%s:%u\n", proxy_type == PROXY_TYPE_HTTP ? "http" : "socks5", proxy_host, proxy_port);
+    printf("Proxy: %s://%s:%u\n", proxy_type == ProxyType::HTTP ? "http" : "socks5", proxy_host, proxy_port);
 
     if (proxy_username[0] != '\0')
         printf("Proxy Auth: %s:***\n", proxy_username);
@@ -703,14 +704,14 @@ int main(int argc, char * argv[])
     printf("DNS via Proxy: %s\n", dns_via_proxy ? "Enabled" : "Disabled");
 
     // setup proxy
-    if (!ProxyPrism_SetProxyConfig(
+    if (!set_proxy_config(
             proxy_type, proxy_host, proxy_port, proxy_username[0] ? proxy_username : "", proxy_password[0] ? proxy_password : ""))
     {
         fprintf(stderr, "ERROR: Failed to set proxy configuration\n");
         return 1;
     }
 
-    ProxyPrism_SetDnsViaProxy(dns_via_proxy);
+    set_dns_via_proxy(dns_via_proxy);
 
     // add rules
     if (num_rules > 0)
@@ -718,14 +719,14 @@ int main(int argc, char * argv[])
         printf("Rules: %d\n", num_rules);
         for (int i = 0; i < num_rules; i++)
         {
-            const char * protocol_str = rules[i].protocol == RULE_PROTOCOL_TCP ? "TCP"
-                : rules[i].protocol == RULE_PROTOCOL_UDP                       ? "UDP"
+            const char * protocol_str = rules[i].protocol == RuleProtocol::TCP ? "TCP"
+                : rules[i].protocol == RuleProtocol::UDP                       ? "UDP"
                                                                                : "BOTH";
-            const char * action_str = rules[i].action == RULE_ACTION_PROXY ? "PROXY"
-                : rules[i].action == RULE_ACTION_DIRECT                    ? "DIRECT"
+            const char * action_str = rules[i].action == RuleAction::PROXY ? "PROXY"
+                : rules[i].action == RuleAction::DIRECT                    ? "DIRECT"
                                                                            : "BLOCK";
 
-            uint32_t rule_id = ProxyPrism_AddRule(
+            uint32_t rule_id = add_rule(
                 rules[i].process_name, rules[i].target_hosts, rules[i].target_ports, rules[i].protocol, rules[i].action);
 
             if (rule_id > 0)
@@ -752,7 +753,7 @@ int main(int argc, char * argv[])
     }
 
     // start proxyprism
-    if (!ProxyPrism_Start())
+    if (!start())
     {
         fprintf(stderr, "ERROR: Failed to start ProxyPrism\n");
         return 1;
@@ -774,7 +775,7 @@ int main(int argc, char * argv[])
     }
 
     // cleanup
-    ProxyPrism_Stop();
+    stop();
     printf("ProxyPrism stopped.\n");
 
     return 0;
