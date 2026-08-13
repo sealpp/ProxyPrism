@@ -64,8 +64,6 @@ bool set_proxy_config(
     const char* username,
     const char* password);
 
-void set_dns_via_proxy(bool enable);
-
 void set_log_callback(LogCallback callback);
 
 void set_connection_callback(ConnectionCallback callback);

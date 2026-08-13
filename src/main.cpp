@@ -97,10 +97,6 @@ static void show_help(const char * prog)
     printf("                           *:*:53:UDP:PROXY\n");
     printf("                           firefox:*:80;443:TCP:DIRECT\n\n");
 
-    printf("  --dns-via-proxy <bool> Route DNS queries through proxy\n");
-    printf("                         Values: true, false, 1, 0\n");
-    printf("                         Default: true\n\n");
-
     printf("  --verbose <level>      Logging verbosity level\n");
     printf("                           0 - No logs (default)\n");
     printf("                           1 - Show log messages only\n");
@@ -128,10 +124,10 @@ static void show_help(const char * prog)
     printf("       --rule wget:*:*:TCP:PROXY \\\n");
     printf("       --verbose 2\n\n");
 
-    printf("  # Route DNS through proxy with multiple apps\n");
+    printf("  # Keep DNS direct, proxy everything else (DNS rule must come first)\n");
     printf("  sudo %s --proxy socks5://127.0.0.1:1080 \\\n", prog);
-    printf("       --rule \"curl;wget;firefox:*:*:BOTH:PROXY\" \\\n");
-    printf("       --dns-via-proxy true --verbose 3\n\n");
+    printf("       --rule \"*:*:53:BOTH:DIRECT\" \\\n");
+    printf("       --rule \"*:*:*:BOTH:PROXY\" --verbose 3\n\n");
 
     printf("NOTE:\n");
     printf("  ProxyPrism requires root privileges to use nfqueue.\n");
@@ -401,7 +397,6 @@ static bool load_config(
     const char * path,
     char * proxy_url,
     size_t proxy_url_size,
-    bool * dns_via_proxy,
     int * verbose_level,
     ProxyRule * rules,
     int * num_rules,
@@ -426,10 +421,6 @@ static bool load_config(
             proxy_url[proxy_url_size - 1] = '\0';
         }
     }
-
-    toml_datum_t dns = toml_seek(top, "options.dns_via_proxy");
-    if (dns.type == TOML_BOOLEAN)
-        *dns_via_proxy = dns.u.boolean;
 
     toml_datum_t verbose = toml_seek(top, "options.verbose");
     if (verbose.type == TOML_INT64)
@@ -525,13 +516,12 @@ int main(int argc, char * argv[])
     char proxy_url[512] = "socks5://127.0.0.1:4444";
     ProxyRule rules[MAX_RULES];
     int num_rules = 0;
-    bool dns_via_proxy = true;
     bool rules_overridden = false;
 
     // Load configuration file if it exists, or if explicitly requested
     if (access(config_path, F_OK) == 0)
     {
-        if (!load_config(config_path, proxy_url, sizeof(proxy_url), &dns_via_proxy, &verbose_level, rules, &num_rules, MAX_RULES))
+        if (!load_config(config_path, proxy_url, sizeof(proxy_url), &verbose_level, rules, &num_rules, MAX_RULES))
             return 1;
     }
     else if (config_path_set)
@@ -580,19 +570,6 @@ int main(int argc, char * argv[])
 
             num_rules++;
         }
-        else if (strcmp(argv[i], "--dns-via-proxy") == 0 && i + 1 < argc)
-        {
-            char * value = argv[++i];
-            if (strcmp(value, "true") == 0 || strcmp(value, "1") == 0)
-                dns_via_proxy = true;
-            else if (strcmp(value, "false") == 0 || strcmp(value, "0") == 0)
-                dns_via_proxy = false;
-            else
-            {
-                fprintf(stderr, "ERROR: Invalid value for --dns-via-proxy. Use: true, false, 1, or 0\n");
-                return 1;
-            }
-        }
         else if (strcmp(argv[i], "--verbose") == 0 && i + 1 < argc)
         {
             verbose_level = atoi(argv[++i]);
@@ -637,8 +614,6 @@ int main(int argc, char * argv[])
 
         if (proxy_username[0] != '\0')
             printf("Proxy Auth: %s:***\n", proxy_username);
-
-        printf("DNS via Proxy: %s\n", dns_via_proxy ? "Enabled" : "Disabled");
 
         if (num_rules > 0)
         {
@@ -701,8 +676,6 @@ int main(int argc, char * argv[])
     if (proxy_username[0] != '\0')
         printf("Proxy Auth: %s:***\n", proxy_username);
 
-    printf("DNS via Proxy: %s\n", dns_via_proxy ? "Enabled" : "Disabled");
-
     // setup proxy
     if (!set_proxy_config(
             proxy_type, proxy_host, proxy_port, proxy_username[0] ? proxy_username : "", proxy_password[0] ? proxy_password : ""))
@@ -710,8 +683,6 @@ int main(int argc, char * argv[])
         fprintf(stderr, "ERROR: Failed to set proxy configuration\n");
         return 1;
     }
-
-    set_dns_via_proxy(dns_via_proxy);
 
     // add rules
     if (num_rules > 0)

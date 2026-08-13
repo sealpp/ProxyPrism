@@ -38,7 +38,7 @@ constexpr std::size_t NUM_PACKET_THREADS = 4;
 constexpr std::uint32_t CONNECTION_HASH_SIZE = 256;
 constexpr std::size_t SOCKS5_BUFFER_SIZE = 1024;
 constexpr std::size_t HTTP_BUFFER_SIZE = 1024;
-constexpr std::size_t LOG_BUFFER_SIZE = 1024
+constexpr std::size_t LOG_BUFFER_SIZE = 1024;
 
 // safe way to run commands without shell injection issues
 static int run_command_v(const char * cmd_path, char * const argv[])
@@ -239,7 +239,6 @@ static uint16_t g_local_relay_port = LOCAL_PROXY_PORT;
 static ProxyType g_proxy_type = ProxyType::SOCKS5;
 static char g_proxy_username[256] = "";
 static char g_proxy_password[256] = "";
-static bool g_dns_via_proxy = true;
 static uint32_t g_proxy_ip_cached = 0; // Cached resolved proxy IP
 static LogCallback g_log_callback = nullptr;
 static ConnectionCallback g_connection_callback = nullptr;
@@ -2008,10 +2007,7 @@ static int packet_callback(struct nfq_q_handle * qh, struct nfgenmsg * nfmsg, st
         if (!(tcph->syn && !tcph->ack))
             return nfq_set_verdict(qh, id, NF_ACCEPT, 0, nullptr);
 
-        if (dest_port == 53 && !g_dns_via_proxy)
-            action = RuleAction::DIRECT;
-        else
-            action = check_process_rule(src_ip, src_port, dest_ip, dest_port, false, &pid);
+        action = check_process_rule(src_ip, src_port, dest_ip, dest_port, false, &pid);
 
         if (action == RuleAction::PROXY && is_broadcast_or_multicast(dest_ip))
             action = RuleAction::DIRECT;
@@ -2085,10 +2081,7 @@ static int packet_callback(struct nfq_q_handle * qh, struct nfgenmsg * nfmsg, st
         if (is_connection_tracked(src_port))
             return nfq_set_verdict(qh, id, NF_ACCEPT, 0, nullptr);
 
-        if (dest_port == 53 && !g_dns_via_proxy)
-            action = RuleAction::DIRECT;
-        else
-            action = check_process_rule(src_ip, src_port, dest_ip, dest_port, true, &pid);
+        action = check_process_rule(src_ip, src_port, dest_ip, dest_port, true, &pid);
 
         if (action == RuleAction::PROXY && is_broadcast_or_multicast(dest_ip))
             action = RuleAction::DIRECT;
@@ -2809,12 +2802,6 @@ bool set_proxy_config(ProxyType type, const char * proxy_ip, uint16_t proxy_port
 
     log_message("proxy configured %s %s:%d", type == ProxyType::HTTP ? "http" : "socks5", proxy_ip, proxy_port);
     return true;
-}
-
-void set_dns_via_proxy(bool enable)
-{
-    g_dns_via_proxy = enable;
-    log_message("dns via proxy %s", enable ? "enabled" : "disabled");
 }
 
 void set_log_callback(LogCallback callback)

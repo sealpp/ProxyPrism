@@ -14,13 +14,10 @@ version = "1.0"
 url = "socks5://127.0.0.1:1080"
 
 [options]
-# Route DNS queries through the proxy (true/false).
-dns_via_proxy = true
-
 # Logging verbosity: 0 = silent, 1 = logs, 2 = connections, 3 = both.
 verbose = 0
 
-# Rules are evaluated in order. Use [[rules]] for each rule.
+# Rules are evaluated in order and the first match wins. Use [[rules]] for each rule.
 # Supported fields per rule:
 #   process   - process name, wildcard (*), or multiple names separated by ';'
 #   hosts     - IP, hostname, wildcard, IP range, or multiple values
@@ -61,3 +58,19 @@ action = "PROXY"
 # protocol = "BOTH"
 # action = "BLOCK"
 # enabled = true
+
+# Standard pattern: keep DNS direct while proxying everything else.
+# Rules are matched in order, so the DNS rule MUST come before the catch-all.
+# [[rules]]
+# process = "*"
+# hosts = "*"
+# ports = "53"
+# protocol = "BOTH"
+# action = "DIRECT"
+#
+# [[rules]]
+# process = "*"
+# hosts = "*"
+# ports = "*"
+# protocol = "BOTH"
+# action = "PROXY"
