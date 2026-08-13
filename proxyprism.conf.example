@@ -2,9 +2,9 @@
 # Place this file at /etc/proxyprism.conf or pass a custom path with:
 #   sudo proxyprism --config /path/to/your.conf
 #
-# This file uses TOML syntax (https://toml.io). Command-line options override
-# values from this file. If you store proxy credentials here, set the file
-# permissions to 600 (rw-------) after editing.
+# This file uses TOML syntax (https://toml.io). Proxy, rules, and logging are
+# configured here and nowhere else. If you store proxy credentials here, set
+# the file permissions to 600 (rw-------) after editing.
 
 version = "1.0"
 

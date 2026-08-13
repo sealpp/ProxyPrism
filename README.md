@@ -34,16 +34,10 @@ sudo ./output/proxyprism
 
 ### DNS traffic
 
-DNS (port 53) is controlled by the same rules as other traffic, so a
-catch-all PROXY rule (e.g. `*:*:*:BOTH:PROXY`) also routes DNS through the
-proxy. To keep DNS direct while proxying everything else, put a port-53
-DIRECT rule before the catch-all:
-
-```bash
-sudo ./output/proxyprism --rule "*:*:53:BOTH:DIRECT" --rule "*:*:*:BOTH:PROXY"
-```
-
-The equivalent TOML is shown in `proxyprism.conf.example`.
+DNS (port 53) follows the same rules as other traffic, so a catch-all PROXY
+rule also routes DNS through the proxy. To keep DNS direct while proxying
+everything else, put a port-53 DIRECT rule before the catch-all (see the
+commented example in `proxyprism.conf.example`).
 
 ## Disclaimer
 

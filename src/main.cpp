@@ -10,7 +10,6 @@
 using namespace proxyprism;
 
 constexpr int MAX_RULES = 100;
-constexpr int MAX_RULE_STR = 1024;
 constexpr const char* DEFAULT_CONFIG_PATH = "/etc/proxyprism.conf";
 
 struct ProxyRule
@@ -77,32 +76,6 @@ static void show_help(const char * prog)
     printf("  --config <path>        Path to TOML configuration file\n");
     printf("                         Default: %s\n\n", DEFAULT_CONFIG_PATH);
 
-    printf("  --proxy <url>          Proxy server URL with optional authentication\n");
-    printf("                         Format: type://ip:port or type://ip:port:username:password\n");
-    printf("                         Examples: socks5://127.0.0.1:1080\n");
-    printf("                                   http://proxy.com:8080:myuser:mypass\n");
-    printf("                         Default: socks5://127.0.0.1:4444\n\n");
-
-    printf("  --rule <rule>          Traffic routing rule (can be specified multiple times)\n");
-    printf("                         Overrides any rules from the config file.\n");
-    printf("                         Format: process:hosts:ports:protocol:action\n");
-    printf("                           process  - Process name(s): curl, cur*, *, or multiple separated by ;\n");
-    printf("                           hosts    - IP/host(s): *, google.com, 192.168.*.*, or multiple separated by ; or ,\n");
-    printf("                           ports    - Port(s): *, 443, 80;8080, 80-100, or multiple separated by ; or ,\n");
-    printf("                           protocol - TCP, UDP, or BOTH\n");
-    printf("                           action   - PROXY, DIRECT, or BLOCK\n");
-    printf("                         Examples:\n");
-    printf("                           curl:*:*:TCP:PROXY\n");
-    printf("                           curl;wget:*:*:TCP:PROXY\n");
-    printf("                           *:*:53:UDP:PROXY\n");
-    printf("                           firefox:*:80;443:TCP:DIRECT\n\n");
-
-    printf("  --verbose <level>      Logging verbosity level\n");
-    printf("                           0 - No logs (default)\n");
-    printf("                           1 - Show log messages only\n");
-    printf("                           2 - Show connection events only\n");
-    printf("                           3 - Show both logs and connections\n\n");
-
     printf("  --check-config         Load and validate the configuration file, then exit\n");
     printf("                         without starting ProxyPrism or touching iptables\n\n");
 
@@ -111,30 +84,26 @@ static void show_help(const char * prog)
 
     printf("  --help, -h             Show this help message\n\n");
 
+    printf("CONFIGURATION:\n");
+    printf("  Proxy server, rules, and logging are set in the TOML file.\n");
+    printf("  See proxyprism.conf.example for the format and examples.\n\n");
+
     printf("EXAMPLES:\n");
-    printf("  # Basic usage with default proxy\n");
-    printf("  sudo %s --rule curl:*:*:TCP:PROXY\n\n", prog);
+    printf("  # Validate the configuration\n");
+    printf("  sudo %s --check-config\n\n", prog);
 
-    printf("  # Use a custom configuration file\n");
-    printf("  sudo %s --config /etc/proxyprism.conf\n\n", prog);
+    printf("  # Run with the default config (/etc/proxyprism.conf)\n");
+    printf("  sudo %s\n\n", prog);
 
-    printf("  # Multiple rules with custom proxy\n");
-    printf("  sudo %s --proxy socks5://192.168.1.10:1080 \\\n", prog);
-    printf("       --rule curl:*:*:TCP:PROXY \\\n");
-    printf("       --rule wget:*:*:TCP:PROXY \\\n");
-    printf("       --verbose 2\n\n");
-
-    printf("  # Keep DNS direct, proxy everything else (DNS rule must come first)\n");
-    printf("  sudo %s --proxy socks5://127.0.0.1:1080 \\\n", prog);
-    printf("       --rule \"*:*:53:BOTH:DIRECT\" \\\n");
-    printf("       --rule \"*:*:*:BOTH:PROXY\" --verbose 3\n\n");
+    printf("  # Run with a custom configuration file\n");
+    printf("  sudo %s --config /path/to/your.conf\n\n", prog);
 
     printf("NOTE:\n");
     printf("  ProxyPrism requires root privileges to use nfqueue.\n");
     printf("  Run with 'sudo' or as root user.\n\n");
 }
 
-static RuleProtocol parse_protocol(const char * str)
+static RuleProtocol parse_protocol(const char * str, int rule_index)
 {
     char upper[16];
     for (size_t i = 0; str[i] && i < 15; i++)
@@ -149,12 +118,12 @@ static RuleProtocol parse_protocol(const char * str)
         return RuleProtocol::BOTH;
     else
     {
-        fprintf(stderr, "ERROR: Invalid protocol '%s'. Use TCP, UDP, or BOTH\n", str);
+        fprintf(stderr, "ERROR: Config rule %d: invalid protocol '%s'. Use TCP, UDP, or BOTH\n", rule_index, str);
         exit(1);
     }
 }
 
-static RuleAction parse_action(const char * str)
+static RuleAction parse_action(const char * str, int rule_index)
 {
     char upper[16];
     for (size_t i = 0; str[i] && i < 15; i++)
@@ -169,7 +138,7 @@ static RuleAction parse_action(const char * str)
         return RuleAction::BLOCK;
     else
     {
-        fprintf(stderr, "ERROR: Invalid action '%s'. Use PROXY, DIRECT, or BLOCK\n", str);
+        fprintf(stderr, "ERROR: Config rule %d: invalid action '%s'. Use PROXY, DIRECT, or BLOCK\n", rule_index, str);
         exit(1);
     }
 }
@@ -191,39 +160,6 @@ static void default_if_empty(char * dest, const char * src, const char * default
     else
         strncpy(dest, src, dest_size - 1);
     dest[dest_size - 1] = '\0';
-}
-
-static bool parse_rule(const char * rule_str, ProxyRule * rule)
-{
-    char buffer[MAX_RULE_STR];
-    strncpy(buffer, rule_str, sizeof(buffer) - 1);
-    buffer[sizeof(buffer) - 1] = '\0';
-
-    char * parts[5] = {nullptr, nullptr, nullptr, nullptr, nullptr};
-    int part_idx = 0;
-    char * token = strtok(buffer, ":");
-
-    while (token != nullptr && part_idx < 5)
-    {
-        parts[part_idx++] = token;
-        token = strtok(nullptr, ":");
-    }
-
-    if (part_idx != 5)
-    {
-        fprintf(stderr, "ERROR: Invalid rule format '%s'\n", rule_str);
-        fprintf(stderr, "Expected format: process:hosts:ports:protocol:action\n");
-        return false;
-    }
-
-    default_if_empty(rule->process_name, parts[0], "*", sizeof(rule->process_name));
-    default_if_empty(rule->target_hosts, parts[1], "*", sizeof(rule->target_hosts));
-    default_if_empty(rule->target_ports, parts[2], "*", sizeof(rule->target_ports));
-
-    rule->protocol = parse_protocol(parts[3]);
-    rule->action = parse_action(parts[4]);
-
-    return true;
 }
 
 static bool parse_proxy_url(const char * url, ProxyType * type, char * host, uint16_t * port, char * username, char * password)
@@ -449,26 +385,20 @@ static bool load_config(
             if (!enabled)
                 continue;
 
-            char process[256];
-            char hosts[256];
-            char ports[256];
+            ProxyRule * r = &rules[*num_rules];
+            int rule_index = *num_rules + 1;
+
+            get_rule_field(rule, "process", r->process_name, sizeof(r->process_name), "*");
+            get_rule_field(rule, "hosts", r->target_hosts, sizeof(r->target_hosts), "*");
+            get_rule_field(rule, "ports", r->target_ports, sizeof(r->target_ports), "*");
+
             char protocol[16];
             char action[16];
-
-            get_rule_field(rule, "process", process, sizeof(process), "*");
-            get_rule_field(rule, "hosts", hosts, sizeof(hosts), "*");
-            get_rule_field(rule, "ports", ports, sizeof(ports), "*");
             get_rule_field(rule, "protocol", protocol, sizeof(protocol), "TCP");
             get_rule_field(rule, "action", action, sizeof(action), "PROXY");
 
-            char rule_str[MAX_RULE_STR];
-            snprintf(rule_str, sizeof(rule_str), "%s:%s:%s:%s:%s", process, hosts, ports, protocol, action);
-
-            if (!parse_rule(rule_str, &rules[*num_rules]))
-            {
-                toml_free(result);
-                return false;
-            }
+            r->protocol = parse_protocol(protocol, rule_index);
+            r->action = parse_action(action, rule_index);
 
             (*num_rules)++;
         }
@@ -481,10 +411,9 @@ static bool load_config(
 int main(int argc, char * argv[])
 {
     const char * config_path = DEFAULT_CONFIG_PATH;
-    bool config_path_set = false;
     bool check_config = false;
 
-    // First pass: handle cleanup, help, --config and --check-config
+    // Single pass: handle immediate actions and parse options
     for (int i = 1; i < argc; i++)
     {
         if (strcmp(argv[i], "--cleanup") == 0)
@@ -501,100 +430,47 @@ int main(int argc, char * argv[])
             return 0;
         }
 
-        if (strcmp(argv[i], "--config") == 0 && i + 1 < argc)
+        if (strcmp(argv[i], "--config") == 0)
         {
+            if (i + 1 >= argc)
+            {
+                fprintf(stderr, "ERROR: --config requires a path argument\n");
+                return 1;
+            }
             config_path = argv[++i];
-            config_path_set = true;
+            continue;
         }
 
         if (strcmp(argv[i], "--check-config") == 0)
         {
             check_config = true;
+            continue;
         }
+
+        fprintf(stderr, "ERROR: Unknown option '%s'\n", argv[i]);
+        fprintf(stderr, "Use --help for usage information\n");
+        return 1;
     }
 
     char proxy_url[512] = "socks5://127.0.0.1:4444";
     ProxyRule rules[MAX_RULES];
     int num_rules = 0;
-    bool rules_overridden = false;
 
-    // Load configuration file if it exists, or if explicitly requested
+    // The configuration file is mandatory
     if (access(config_path, F_OK) == 0)
     {
         if (!load_config(config_path, proxy_url, sizeof(proxy_url), &verbose_level, rules, &num_rules, MAX_RULES))
             return 1;
     }
-    else if (config_path_set)
+    else
     {
         fprintf(stderr, "ERROR: Config file not found: %s\n", config_path);
+        fprintf(stderr, "Create one from proxyprism.conf.example or pass --config <path>\n");
         return 1;
     }
 
-    // Second pass: process command-line overrides
-    for (int i = 1; i < argc; i++)
-    {
-        if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0)
-        {
-            show_help(argv[0]);
-            return 0;
-        }
-        else if (strcmp(argv[i], "--check-config") == 0)
-        {
-            // already handled in first pass
-        }
-        else if (strcmp(argv[i], "--config") == 0 && i + 1 < argc)
-        {
-            i++; // already handled in first pass
-        }
-        else if (strcmp(argv[i], "--proxy") == 0 && i + 1 < argc)
-        {
-            strncpy(proxy_url, argv[++i], sizeof(proxy_url) - 1);
-            proxy_url[sizeof(proxy_url) - 1] = '\0';
-        }
-        else if (strcmp(argv[i], "--rule") == 0 && i + 1 < argc)
-        {
-            if (!rules_overridden)
-            {
-                num_rules = 0;
-                rules_overridden = true;
-            }
-
-            if (num_rules >= MAX_RULES)
-            {
-                fprintf(stderr, "ERROR: Maximum %d rules supported\n", MAX_RULES);
-                return 1;
-            }
-
-            if (!parse_rule(argv[++i], &rules[num_rules]))
-                return 1;
-
-            num_rules++;
-        }
-        else if (strcmp(argv[i], "--verbose") == 0 && i + 1 < argc)
-        {
-            verbose_level = atoi(argv[++i]);
-            if (verbose_level < 0 || verbose_level > 3)
-            {
-                fprintf(stderr, "ERROR: Verbose level must be 0-3\n");
-                return 1;
-            }
-        }
-        else if (strcmp(argv[i], "--cleanup") == 0)
-        {
-            // already handled
-        }
-        else
-        {
-            fprintf(stderr, "ERROR: Unknown option '%s'\n", argv[i]);
-            fprintf(stderr, "Use --help for usage information\n");
-            return 1;
-        }
-    }
-
     show_banner();
-
-    if (config_path_set || access(config_path, F_OK) == 0)
-        printf("Loaded config: %s\n", config_path);
+    printf("Loaded config: %s\n", config_path);
 
     // parse proxy config
     ProxyType proxy_type;
@@ -720,7 +596,7 @@ int main(int argc, char * argv[])
     else
     {
         printf("\033[33mWARNING: No rules specified. No traffic will be proxied.\033[0m\n");
-        printf("Use --rule to add proxy rules or define rules in /etc/proxyprism.conf. See --help for examples.\n");
+        printf("Define rules in %s. See proxyprism.conf.example for the format.\n", DEFAULT_CONFIG_PATH);
     }
 
     // start proxyprism
