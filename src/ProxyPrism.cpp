@@ -680,33 +680,33 @@ nl_done:
 
     // fallback for udp if netlink didnt find it
     // happens when app uses sendto without connecting socket first
-    if (!found && is_udp && src_ip.family == AddressFamily::IPv4)
+    if (!found && is_udp)
     {
-        const char * udp_files[] = {"/proc/net/udp", "/proc/net/udp6"};
-        for (int file_idx = 0; file_idx < 2 && pid == 0; file_idx++)
+        const char* udp_file = src_ip.family == AddressFamily::IPv4 ? "/proc/net/udp" : "/proc/net/udp6";
+        FILE* fp = fopen(udp_file, "r");
+        if (fp)
         {
-            FILE * fp = fopen(udp_files[file_idx], "r");
-            if (!fp)
-                continue;
-
             char line[512];
-            if (!fgets(line, sizeof(line), fp))
-            { // skip header
-                fclose(fp);
-                continue;
-            }
-            while (fgets(line, sizeof(line), fp))
+            if (fgets(line, sizeof(line), fp))
             {
-                unsigned int local_addr, local_port;
-                unsigned long inode;
-                int uid_val;
-
-                if (sscanf(line, "%*d: %X:%X %*X:%*X %*X %*X:%*X %*X:%*X %*X %d %*d %lu", &local_addr, &local_port, &uid_val, &inode) == 4)
+                while (fgets(line, sizeof(line), fp))
                 {
-                    if (local_port == src_port && inode != 0)
+                    unsigned int local_port = 0;
+                    unsigned long inode = 0;
+                    int uid_val = 0;
+                    if (sscanf(
+                            line,
+                            "%*d: %*32[0-9A-Fa-f]:%X %*32[0-9A-Fa-f]:%*X %*X %*X:%*X %*X:%*X %*X %d %*d %lu",
+                            &local_port,
+                            &uid_val,
+                            &inode)
+                        == 3)
                     {
-                        pid = find_pid_from_inode(inode, (uint32_t)uid_val);
-                        break;
+                        if (local_port == src_port && inode != 0)
+                        {
+                            pid = find_pid_from_inode(inode, (uint32_t)uid_val);
+                            break;
+                        }
                     }
                 }
             }
