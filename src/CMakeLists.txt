@@ -1,5 +1,14 @@
 # Single ProxyPrism executable.
 
+add_library(proxyprism_address_rules STATIC
+    NetworkAddress.cpp
+)
+
+target_include_directories(proxyprism_address_rules
+    PUBLIC
+        ${CMAKE_CURRENT_SOURCE_DIR}
+)
+
 add_executable(proxyprism
     ProxyPrism.cpp
     main.cpp
@@ -16,6 +25,7 @@ target_include_directories(proxyprism
 
 target_link_libraries(proxyprism
     PRIVATE
+        proxyprism_address_rules
         tomlc17
         netfilter_queue
         nfnetlink
