@@ -199,37 +199,65 @@ static bool parse_proxy_url(const char * url, ProxyType * type, char * host, uin
         return false;
     }
 
-    // parse host:port[:user:pass]
-    char * parts[4];
-    int num_parts = 0;
-    char * token = strtok(rest, ":");
-    while (token != nullptr && num_parts < 4)
+    // Parse host:port[:user:pass]. IPv6 hosts must be bracketed so ':'
+    // remains available as the field separator.
+    char* port_text = nullptr;
+    if (rest[0] == '[')
     {
-        parts[num_parts++] = token;
-        token = strtok(nullptr, ":");
+        char* closing_bracket = strchr(rest, ']');
+        if (closing_bracket == nullptr || closing_bracket[1] != ':')
+        {
+            fprintf(stderr, "ERROR: IPv6 proxy URL must use [address]:port\n");
+            return false;
+        }
+        *closing_bracket = '\0';
+        strncpy(host, rest + 1, 255);
+        host[255] = '\0';
+        port_text = closing_bracket + 2;
+    }
+    else
+    {
+        char* port_separator = strchr(rest, ':');
+        if (port_separator == nullptr)
+        {
+            fprintf(stderr, "ERROR: Invalid proxy URL. Missing host or port\n");
+            return false;
+        }
+        *port_separator = '\0';
+        strncpy(host, rest, 255);
+        host[255] = '\0';
+        port_text = port_separator + 1;
     }
 
-    if (num_parts < 2)
+    char* auth_separator = strchr(port_text, ':');
+    if (auth_separator != nullptr)
+        *auth_separator = '\0';
+
+    if (host[0] == '\0' || port_text[0] == '\0')
     {
         fprintf(stderr, "ERROR: Invalid proxy URL. Missing host or port\n");
         return false;
     }
 
-    strncpy(host, parts[0], 255);
-    host[255] = '\0';
-
-    *port = atoi(parts[1]);
+    *port = atoi(port_text);
     if (*port == 0)
     {
-        fprintf(stderr, "ERROR: Invalid proxy port '%s'\n", parts[1]);
+        fprintf(stderr, "ERROR: Invalid proxy port '%s'\n", port_text);
         return false;
     }
 
-    if (num_parts >= 4)
+    if (auth_separator != nullptr)
     {
-        strncpy(username, parts[2], 255);
+        char* password_separator = strchr(auth_separator + 1, ':');
+        if (password_separator == nullptr)
+        {
+            fprintf(stderr, "ERROR: Proxy credentials require username and password\n");
+            return false;
+        }
+        *password_separator = '\0';
+        strncpy(username, auth_separator + 1, 255);
         username[255] = '\0';
-        strncpy(password, parts[3], 255);
+        strncpy(password, password_separator + 1, 255);
         password[255] = '\0';
     }
 
@@ -508,7 +536,10 @@ int main(int argc, char * argv[])
     // without touching iptables, nfqueue, or the network.
     if (check_config)
     {
-        printf("Proxy: %s://%s:%u\n", proxy_type == ProxyType::HTTP ? "http" : "socks5", proxy_host, proxy_port);
+        if (strchr(proxy_host, ':') != nullptr)
+            printf("Proxy: %s://[%s]:%u\n", proxy_type == ProxyType::HTTP ? "http" : "socks5", proxy_host, proxy_port);
+        else
+            printf("Proxy: %s://%s:%u\n", proxy_type == ProxyType::HTTP ? "http" : "socks5", proxy_host, proxy_port);
 
         if (proxy_username[0] != '\0')
             printf("Proxy Auth: %s:***\n", proxy_username);
@@ -569,7 +600,10 @@ int main(int argc, char * argv[])
     set_traffic_logging_enabled(verbose_level > 0);
 
     // show config
-    printf("Proxy: %s://%s:%u\n", proxy_type == ProxyType::HTTP ? "http" : "socks5", proxy_host, proxy_port);
+    if (strchr(proxy_host, ':') != nullptr)
+        printf("Proxy: %s://[%s]:%u\n", proxy_type == ProxyType::HTTP ? "http" : "socks5", proxy_host, proxy_port);
+    else
+        printf("Proxy: %s://%s:%u\n", proxy_type == ProxyType::HTTP ? "http" : "socks5", proxy_host, proxy_port);
 
     if (proxy_username[0] != '\0')
         printf("Proxy Auth: %s:***\n", proxy_username);

@@ -1,5 +1,5 @@
 [proxy]
-url = "socks5://127.0.0.1:1080"
+url = "socks5://[::1]:1080"
 
 [[rules]]
 process = "first"
