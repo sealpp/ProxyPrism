@@ -491,10 +491,6 @@ static uint64_t get_monotonic_ms(void)
 static uint32_t parse_ipv4(const char * ip);
 static uint32_t resolve_hostname(const char * hostname);
 static int socks5_connect(int s, const NetworkAddress& dest_ip, uint16_t dest_port);
-static bool match_ip_pattern(const char * pattern, const NetworkAddress& ip);
-static bool match_port_pattern(const char * pattern, uint16_t port);
-static bool match_ip_list(const char * ip_list, const NetworkAddress& ip);
-static bool match_port_list(const char * port_list, uint16_t port);
 static bool match_process_pattern(const char * pattern, const char * process_name);
 static bool match_process_list(const char * process_list, const char * process_name);
 static int http_connect(int s, const NetworkAddress& dest_ip, uint16_t dest_port);
@@ -747,36 +743,6 @@ static bool get_process_name_from_pid(uint32_t pid, char * name, size_t name_siz
     return true;
 }
 
-static bool match_ip_pattern(const char * pattern, const NetworkAddress& ip)
-{
-    return pattern != nullptr && match_host_pattern(pattern, ip);
-}
-
-static bool match_port_pattern(const char * pattern, uint16_t port)
-{
-    return pattern != nullptr && match_port_list(pattern, port);
-}
-
-static bool ip_match_wrapper(const char * token, const void * data)
-{
-    return match_ip_pattern(token, *(const NetworkAddress*)data);
-}
-
-static bool match_ip_list(const char * ip_list, const NetworkAddress& ip)
-{
-    return parse_token_list(ip_list, ";", ip_match_wrapper, &ip);
-}
-
-static bool port_match_wrapper(const char * token, const void * data)
-{
-    return match_port_pattern(token, *(const uint16_t *)data);
-}
-
-static bool match_port_list(const char * port_list, uint16_t port)
-{
-    return parse_token_list(port_list, ",;", port_match_wrapper, &port);
-}
-
 static bool match_process_pattern(const char * pattern, const char * process_full_path)
 {
     if (pattern == nullptr || strcmp(pattern, "*") == 0)
@@ -930,7 +896,7 @@ static RuleAction match_rule(const char * process_name, const NetworkAddress& de
 
             if (has_ip_filter || has_port_filter)
             {
-                if (match_ip_list(rule->target_hosts, dest_ip) && match_port_list(rule->target_ports, dest_port))
+                if (match_host_list(rule->target_hosts, dest_ip) && match_port_list(rule->target_ports, dest_port))
                 {
                     return rule->action;
                 }
@@ -948,7 +914,7 @@ static RuleAction match_rule(const char * process_name, const NetworkAddress& de
 
         if (match_process_list(rule->process_name, process_name))
         {
-            if (match_ip_list(rule->target_hosts, dest_ip) && match_port_list(rule->target_ports, dest_port))
+            if (match_host_list(rule->target_hosts, dest_ip) && match_port_list(rule->target_ports, dest_port))
             {
                 return rule->action;
             }
