@@ -168,6 +168,11 @@ bool prefix_matches(const NetworkAddress& network, int prefix_length, const Netw
     return (network.bytes[whole_bytes] & mask) == (address.bytes[whole_bytes] & mask);
 }
 
+std::size_t address_byte_count(const NetworkAddress& address)
+{
+    return address.family == AddressFamily::IPv4 ? 4 : 16;
+}
+
 template <typename Match>
 bool any_token(std::string_view list, std::string_view delimiters, Match&& match)
 {
@@ -301,6 +306,80 @@ bool validate_port_list(std::string_view patterns, std::string* error_message)
             return parse_port_pattern(token, &first, &last);
         },
         error_message);
+}
+
+bool encode_socks5_address(
+    const NetworkAddress& address,
+    std::uint16_t port,
+    std::uint8_t* output,
+    std::size_t output_size,
+    std::size_t* encoded_size)
+{
+    const std::size_t address_size = address_byte_count(address);
+    const std::size_t required = 1 + address_size + 2;
+    if (output == nullptr || encoded_size == nullptr || output_size < required)
+        return false;
+
+    output[0] = address.family == AddressFamily::IPv4 ? 0x01 : 0x04;
+    memcpy(output + 1, address.bytes.data(), address_size);
+    const std::uint16_t network_port = htons(port);
+    memcpy(output + 1 + address_size, &network_port, sizeof(network_port));
+    *encoded_size = required;
+    return true;
+}
+
+bool decode_socks5_address(
+    const std::uint8_t* input,
+    std::size_t input_size,
+    NetworkAddress* address,
+    std::uint16_t* port,
+    std::size_t* decoded_size)
+{
+    if (input == nullptr || address == nullptr || port == nullptr || decoded_size == nullptr || input_size < 1)
+        return false;
+
+    const std::size_t address_size = input[0] == 0x01 ? 4 : input[0] == 0x04 ? 16 : 0;
+    const std::size_t required = 1 + address_size + 2;
+    if (address_size == 0 || input_size < required)
+        return false;
+
+    address->family = input[0] == 0x01 ? AddressFamily::IPv4 : AddressFamily::IPv6;
+    address->bytes.fill(0);
+    memcpy(address->bytes.data(), input + 1, address_size);
+    std::uint16_t network_port = 0;
+    memcpy(&network_port, input + 1 + address_size, sizeof(network_port));
+    *port = ntohs(network_port);
+    *decoded_size = required;
+    return true;
+}
+
+bool make_loopback_endpoint(
+    AddressFamily family,
+    std::uint16_t port,
+    sockaddr_storage* endpoint,
+    socklen_t* endpoint_size)
+{
+    if (endpoint == nullptr || endpoint_size == nullptr)
+        return false;
+
+    memset(endpoint, 0, sizeof(*endpoint));
+    if (family == AddressFamily::IPv4)
+    {
+        auto* ipv4 = reinterpret_cast<sockaddr_in*>(endpoint);
+        ipv4->sin_family = AF_INET;
+        ipv4->sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        ipv4->sin_port = htons(port);
+        *endpoint_size = sizeof(*ipv4);
+    }
+    else
+    {
+        auto* ipv6 = reinterpret_cast<sockaddr_in6*>(endpoint);
+        ipv6->sin6_family = AF_INET6;
+        ipv6->sin6_addr = in6addr_loopback;
+        ipv6->sin6_port = htons(port);
+        *endpoint_size = sizeof(*ipv6);
+    }
+    return true;
 }
 
 } // namespace proxyprism

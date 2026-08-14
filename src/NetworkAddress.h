@@ -1,7 +1,9 @@
 #pragma once
 
 #include <array>
+#include <cstddef>
 #include <cstdint>
+#include <sys/socket.h>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -31,5 +33,24 @@ bool validate_host_list(std::string_view patterns, std::string* error_message = 
 
 bool match_port_list(std::string_view patterns, std::uint16_t port);
 bool validate_port_list(std::string_view patterns, std::string* error_message = nullptr);
+
+bool encode_socks5_address(
+    const NetworkAddress& address,
+    std::uint16_t port,
+    std::uint8_t* output,
+    std::size_t output_size,
+    std::size_t* encoded_size);
+bool decode_socks5_address(
+    const std::uint8_t* input,
+    std::size_t input_size,
+    NetworkAddress* address,
+    std::uint16_t* port,
+    std::size_t* decoded_size);
+
+bool make_loopback_endpoint(
+    AddressFamily family,
+    std::uint16_t port,
+    sockaddr_storage* endpoint,
+    socklen_t* endpoint_size);
 
 } // namespace proxyprism

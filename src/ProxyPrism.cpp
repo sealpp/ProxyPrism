@@ -280,10 +280,11 @@ static bool running = false;
 static uint32_t g_current_process_id = 0;
 
 // udp relay stuff
-static int udp_relay_socket = -1;
+static int udp_relay_sockets[2] = {-1, -1};
 static int socks5_udp_control_socket = -1;
 static int socks5_udp_send_socket = -1;
-static struct sockaddr_in socks5_udp_relay_addr;
+static struct sockaddr_storage socks5_udp_relay_addr;
+static socklen_t socks5_udp_relay_addr_len = 0;
 static bool udp_associate_connected = false;
 static uint64_t last_udp_connect_attempt = 0;
 
@@ -1071,16 +1072,13 @@ static int socks5_connect(int s, const NetworkAddress& dest_ip, uint16_t dest_po
         return -1;
     }
 
-    const size_t address_size = network_address_size(dest_ip);
     buf[0] = SOCKS5_VERSION;
     buf[1] = SOCKS5_CMD_CONNECT;
     buf[2] = 0x00;
-    buf[3] = dest_ip.family == AddressFamily::IPv4 ? SOCKS5_ATYP_IPV4 : SOCKS5_ATYP_IPV6;
-    memcpy(buf + 4, dest_ip.bytes.data(), address_size);
-    uint16_t port_net = htons(dest_port);
-    memcpy(buf + 4 + address_size, &port_net, 2);
-
-    const size_t request_size = 4 + address_size + 2;
+    size_t encoded_size = 0;
+    if (!encode_socks5_address(dest_ip, dest_port, buf + 3, sizeof(buf) - 3, &encoded_size))
+        return -1;
+    const size_t request_size = 3 + encoded_size;
     if (send(s, buf, request_size, MSG_NOSIGNAL) != (ssize_t)request_size)
     {
         log_message("socks5 failed to send connect request");
@@ -1642,163 +1640,127 @@ static void * local_proxy_server(void * arg)
     return nullptr;
 }
 
-// socks5 udp associate
-static int socks5_udp_associate(int s, struct sockaddr_in * relay_addr)
+static void teardown_udp_associate(void);
+
+// SOCKS5 UDP uses the proxy endpoint family for ASSOCIATE and accepts either
+// IPv4 or IPv6 relay addresses in the response.
+static int socks5_udp_associate(int s, struct sockaddr_storage* relay_addr, socklen_t* relay_addr_len)
 {
     unsigned char buf[512];
-    ssize_t len;
-
-    // auth handshake
-    bool use_auth = (g_proxy_username[0] != '\0');
+    const bool use_auth = g_proxy_username[0] != '\0';
     buf[0] = SOCKS5_VERSION;
     buf[1] = use_auth ? 0x02 : 0x01;
     buf[2] = SOCKS5_AUTH_NONE;
     if (use_auth)
-        buf[3] = 0x02; // username/password auth
-
+        buf[3] = 0x02;
     if (send(s, buf, use_auth ? 4 : 3, MSG_NOSIGNAL) != (use_auth ? 4 : 3))
         return -1;
-
-    len = recv(s, buf, 2, 0);
-    if (len != 2 || buf[0] != SOCKS5_VERSION)
+    if (recv(s, buf, 2, MSG_WAITALL) != 2 || buf[0] != SOCKS5_VERSION)
         return -1;
 
     if (buf[1] == 0x02 && use_auth)
     {
-        size_t ulen = strlen(g_proxy_username);
-        size_t plen = strlen(g_proxy_password);
+        const size_t username_len = strlen(g_proxy_username);
+        const size_t password_len = strlen(g_proxy_password);
         buf[0] = 0x01;
-        buf[1] = (unsigned char)ulen;
-        memcpy(buf + 2, g_proxy_username, ulen);
-        buf[2 + ulen] = (unsigned char)plen;
-        memcpy(buf + 3 + ulen, g_proxy_password, plen);
-
-        if (send(s, buf, 3 + ulen + plen, MSG_NOSIGNAL) != (ssize_t)(3 + ulen + plen))
-            return -1;
-
-        len = recv(s, buf, 2, 0);
-        if (len != 2 || buf[0] != 0x01 || buf[1] != 0x00)
+        buf[1] = (unsigned char)username_len;
+        memcpy(buf + 2, g_proxy_username, username_len);
+        buf[2 + username_len] = (unsigned char)password_len;
+        memcpy(buf + 3 + username_len, g_proxy_password, password_len);
+        if (send(s, buf, 3 + username_len + password_len, MSG_NOSIGNAL) != (ssize_t)(3 + username_len + password_len)
+            || recv(s, buf, 2, MSG_WAITALL) != 2 || buf[0] != 0x01 || buf[1] != 0x00)
             return -1;
     }
     else if (buf[1] != SOCKS5_AUTH_NONE)
+    {
         return -1;
+    }
 
-    // udp associate request
+    const bool proxy_is_ipv6 = g_proxy_addr.ss_family == AF_INET6;
+    const size_t request_address_size = proxy_is_ipv6 ? 16 : 4;
     buf[0] = SOCKS5_VERSION;
     buf[1] = SOCKS5_CMD_UDP_ASSOCIATE;
     buf[2] = 0x00;
-    buf[3] = SOCKS5_ATYP_IPV4;
-    memset(buf + 4, 0, 4); // 0.0.0.0
-    memset(buf + 8, 0, 2); // port 0
-
-    if (send(s, buf, 10, MSG_NOSIGNAL) != 10)
+    buf[3] = proxy_is_ipv6 ? SOCKS5_ATYP_IPV6 : SOCKS5_ATYP_IPV4;
+    memset(buf + 4, 0, request_address_size);
+    memset(buf + 4 + request_address_size, 0, 2);
+    if (send(s, buf, 6 + request_address_size, MSG_NOSIGNAL) != (ssize_t)(6 + request_address_size))
         return -1;
 
-    len = recv(s, buf, 512, 0);
-    if (len < 10 || buf[0] != SOCKS5_VERSION || buf[1] != 0x00)
+    if (recv(s, buf, 4, MSG_WAITALL) != 4 || buf[0] != SOCKS5_VERSION || buf[1] != 0x00)
+        return -1;
+    const size_t response_address_size = buf[3] == SOCKS5_ATYP_IPV4 ? 4 : buf[3] == SOCKS5_ATYP_IPV6 ? 16 : 0;
+    if (response_address_size == 0 || recv(s, buf + 4, response_address_size + 2, MSG_WAITALL) != (ssize_t)(response_address_size + 2))
         return -1;
 
-    // get relay address
+    memset(relay_addr, 0, sizeof(*relay_addr));
     if (buf[3] == SOCKS5_ATYP_IPV4)
     {
-        memset(relay_addr, 0, sizeof(*relay_addr));
-        relay_addr->sin_family = AF_INET;
-        memcpy(&relay_addr->sin_addr.s_addr, buf + 4, 4);
-        memcpy(&relay_addr->sin_port, buf + 8, 2);
-        return 0;
+        struct sockaddr_in* relay = (struct sockaddr_in*)relay_addr;
+        relay->sin_family = AF_INET;
+        memcpy(&relay->sin_addr, buf + 4, 4);
+        memcpy(&relay->sin_port, buf + 8, 2);
+        *relay_addr_len = sizeof(*relay);
     }
-
-    return -1;
+    else
+    {
+        struct sockaddr_in6* relay = (struct sockaddr_in6*)relay_addr;
+        relay->sin6_family = AF_INET6;
+        memcpy(&relay->sin6_addr, buf + 4, 16);
+        memcpy(&relay->sin6_port, buf + 20, 2);
+        *relay_addr_len = sizeof(*relay);
+    }
+    return 0;
 }
 
 static bool establish_udp_associate(void)
 {
-    uint64_t now = get_monotonic_ms();
-    if (now - last_udp_connect_attempt < 5000)
+    const uint64_t now = get_monotonic_ms();
+    if (now - last_udp_connect_attempt < 5000 || g_proxy_addr_len == 0)
         return false;
-
     last_udp_connect_attempt = now;
+    teardown_udp_associate();
 
-    if (socks5_udp_control_socket >= 0)
-    {
-        close(socks5_udp_control_socket);
-        socks5_udp_control_socket = -1;
-    }
-    if (socks5_udp_send_socket >= 0)
-    {
-        close(socks5_udp_send_socket);
-        socks5_udp_send_socket = -1;
-    }
-
-    int tcp_sock = socket(AF_INET, SOCK_STREAM, 0);
+    const int tcp_sock = socket(g_proxy_addr.ss_family, SOCK_STREAM, 0);
     if (tcp_sock < 0)
         return false;
-
     configure_tcp_socket(tcp_sock, 262144, 3000);
-
-    uint32_t socks5_ip = resolve_hostname(g_proxy_host);
-    if (socks5_ip == 0)
+    if (connect(tcp_sock, (struct sockaddr*)&g_proxy_addr, g_proxy_addr_len) < 0
+        || socks5_udp_associate(tcp_sock, &socks5_udp_relay_addr, &socks5_udp_relay_addr_len) != 0)
     {
         close(tcp_sock);
         return false;
     }
 
-    struct sockaddr_in socks_addr;
-    memset(&socks_addr, 0, sizeof(socks_addr));
-    socks_addr.sin_family = AF_INET;
-    socks_addr.sin_addr.s_addr = socks5_ip;
-    socks_addr.sin_port = htons(g_proxy_port);
-
-    if (connect(tcp_sock, (struct sockaddr *)&socks_addr, sizeof(socks_addr)) < 0)
+    if (socks5_udp_relay_addr.ss_family == g_proxy_addr.ss_family)
     {
-        close(tcp_sock);
-        return false;
+        if (socks5_udp_relay_addr.ss_family == AF_INET
+            && ((struct sockaddr_in*)&socks5_udp_relay_addr)->sin_addr.s_addr == INADDR_ANY)
+            ((struct sockaddr_in*)&socks5_udp_relay_addr)->sin_addr = ((struct sockaddr_in*)&g_proxy_addr)->sin_addr;
+        if (socks5_udp_relay_addr.ss_family == AF_INET6
+            && IN6_IS_ADDR_UNSPECIFIED(&((struct sockaddr_in6*)&socks5_udp_relay_addr)->sin6_addr))
+            ((struct sockaddr_in6*)&socks5_udp_relay_addr)->sin6_addr = ((struct sockaddr_in6*)&g_proxy_addr)->sin6_addr;
     }
 
-    if (socks5_udp_associate(tcp_sock, &socks5_udp_relay_addr) != 0)
-    {
-        close(tcp_sock);
-        return false;
-    }
-
-    // rfc says if server gives 0.0.0.0 use proxy servers ip instead
-    if (socks5_udp_relay_addr.sin_addr.s_addr == INADDR_ANY)
-        socks5_udp_relay_addr.sin_addr.s_addr = socks5_ip;
-
-    // Handshake done - remove the 3s timeout so the control socket stays open indefinitely.
     struct timeval zero_tv = {0, 0};
     setsockopt(tcp_sock, SOL_SOCKET, SO_RCVTIMEO, &zero_tv, sizeof(zero_tv));
     setsockopt(tcp_sock, SOL_SOCKET, SO_SNDTIMEO, &zero_tv, sizeof(zero_tv));
-
-    // Enable TCP keepalives so the SOCKS5 proxy doesn't idle-close the control
-    // connection (many proxies terminate it after ~60s of silence, killing UDP ASSOCIATE).
-    int ka_on = 1;
-    int ka_idle = 10; // start keepalives after 10s idle
-    int ka_intvl = 2; // send keepalive every 2s
-    int ka_cnt = 5; // drop after 5 missed keepalives
-    setsockopt(tcp_sock, SOL_SOCKET, SO_KEEPALIVE, &ka_on, sizeof(ka_on));
-    setsockopt(tcp_sock, SOL_TCP, TCP_KEEPIDLE, &ka_idle, sizeof(ka_idle));
-    setsockopt(tcp_sock, SOL_TCP, TCP_KEEPINTVL, &ka_intvl, sizeof(ka_intvl));
-    setsockopt(tcp_sock, SOL_TCP, TCP_KEEPCNT, &ka_cnt, sizeof(ka_cnt));
+    const int keepalive = 1;
+    setsockopt(tcp_sock, SOL_SOCKET, SO_KEEPALIVE, &keepalive, sizeof(keepalive));
 
     socks5_udp_control_socket = tcp_sock;
-
-    socks5_udp_send_socket = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    socks5_udp_send_socket = socket(socks5_udp_relay_addr.ss_family, SOCK_DGRAM, IPPROTO_UDP);
     if (socks5_udp_send_socket < 0)
     {
-        close(socks5_udp_control_socket);
-        socks5_udp_control_socket = -1;
+        teardown_udp_associate();
         return false;
     }
-
     configure_udp_socket(socks5_udp_send_socket, 262144, 30000);
-
     udp_associate_connected = true;
     log_message("UDP ASSOCIATE established with SOCKS5 proxy");
     return true;
 }
 
-// teardown udp associate so next packet reconnects
 static void teardown_udp_associate(void)
 {
     udp_associate_connected = false;
@@ -1812,240 +1774,184 @@ static void teardown_udp_associate(void)
         close(socks5_udp_send_socket);
         socks5_udp_send_socket = -1;
     }
+    socks5_udp_relay_addr_len = 0;
+}
+
+static int create_udp_relay_listener(AddressFamily family)
+{
+    const int relay_socket = socket(socket_family(family), SOCK_DGRAM, IPPROTO_UDP);
+    if (relay_socket < 0)
+        return -1;
+    const int on = 1;
+    setsockopt(relay_socket, SOL_SOCKET, SO_REUSEADDR, &on, sizeof(on));
+    if (family == AddressFamily::IPv6)
+    {
+        const int v6_only = 1;
+        setsockopt(relay_socket, IPPROTO_IPV6, IPV6_V6ONLY, &v6_only, sizeof(v6_only));
+        struct sockaddr_in6 addr{};
+        addr.sin6_family = AF_INET6;
+        addr.sin6_addr = in6addr_any;
+        addr.sin6_port = htons(LOCAL_UDP_RELAY_PORT);
+        if (bind(relay_socket, (struct sockaddr*)&addr, sizeof(addr)) < 0)
+        {
+            close(relay_socket);
+            return -1;
+        }
+    }
+    else
+    {
+        struct sockaddr_in addr{};
+        addr.sin_family = AF_INET;
+        addr.sin_addr.s_addr = INADDR_ANY;
+        addr.sin_port = htons(LOCAL_UDP_RELAY_PORT);
+        if (bind(relay_socket, (struct sockaddr*)&addr, sizeof(addr)) < 0)
+        {
+            close(relay_socket);
+            return -1;
+        }
+    }
+    configure_udp_socket(relay_socket, 262144, 30000);
+    return relay_socket;
 }
 
 static void * udp_relay_server(void * arg)
 {
     (void)arg;
-    struct sockaddr_in local_addr, from_addr;
+    udp_relay_sockets[0] = create_udp_relay_listener(AddressFamily::IPv4);
+    udp_relay_sockets[1] = create_udp_relay_listener(AddressFamily::IPv6);
+    if (udp_relay_sockets[0] < 0)
+        log_message("IPv4 UDP relay listener failed");
+    if (udp_relay_sockets[1] < 0)
+        log_message("IPv6 UDP relay listener failed");
+    if (udp_relay_sockets[0] < 0 && udp_relay_sockets[1] < 0)
+        return nullptr;
+
     unsigned char recv_buf[65536];
     unsigned char send_buf[65536];
-    socklen_t from_len;
-
-    udp_relay_socket = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
-    if (udp_relay_socket < 0)
-        return nullptr;
-
-    int on = 1;
-    setsockopt(udp_relay_socket, SOL_SOCKET, SO_REUSEADDR, &on, sizeof(on));
-    configure_udp_socket(udp_relay_socket, 262144, 30000);
-
-    memset(&local_addr, 0, sizeof(local_addr));
-    local_addr.sin_family = AF_INET;
-    local_addr.sin_addr.s_addr = INADDR_ANY;
-    local_addr.sin_port = htons(LOCAL_UDP_RELAY_PORT);
-
-    if (bind(udp_relay_socket, (struct sockaddr *)&local_addr, sizeof(local_addr)) < 0)
-    {
-        close(udp_relay_socket);
-        udp_relay_socket = -1;
-        return nullptr;
-    }
-
-    // try initial connect, not fatal if proxy not up yet
     udp_associate_connected = establish_udp_associate();
 
     while (running)
     {
-        struct pollfd fds[3];
-        int nfds = 1;
-
-        // watch local relay socket for client packets
-        fds[0].fd = udp_relay_socket;
-        fds[0].events = POLLIN;
-        fds[0].revents = 0;
-
-        // watch socks5 udp socket for proxy responses
-        fds[1].fd = (udp_associate_connected && socks5_udp_send_socket >= 0) ? socks5_udp_send_socket : -1;
-        fds[1].events = POLLIN;
-        fds[1].revents = 0;
-
-        // watch socks5 tcp socket to detect if connection dies
-        fds[2].fd = (udp_associate_connected && socks5_udp_control_socket >= 0) ? socks5_udp_control_socket : -1;
-        fds[2].events = POLLIN;
-        fds[2].revents = 0;
-        nfds = 3;
-
-        int ready = poll(fds, nfds, 1000); // 1s timeout
+        struct pollfd fds[4] = {
+            {udp_relay_sockets[0], POLLIN, 0},
+            {udp_relay_sockets[1], POLLIN, 0},
+            {udp_associate_connected ? socks5_udp_send_socket : -1, POLLIN, 0},
+            {udp_associate_connected ? socks5_udp_control_socket : -1, POLLIN, 0},
+        };
+        const int ready = poll(fds, 4, 1000);
         if (ready <= 0)
         {
-            // Proactively reconnect so the next client packet is not dropped.
             if (!udp_associate_connected)
                 udp_associate_connected = establish_udp_associate();
             continue;
         }
 
-        // check if tcp control still alive
-        // if it dies the udp associate is dead too
-        if (fds[2].fd >= 0 && (fds[2].revents & (POLLIN | POLLHUP | POLLERR)))
+        if (fds[3].fd >= 0 && (fds[3].revents & (POLLIN | POLLHUP | POLLERR)))
         {
-            char peek_buf[1];
-            ssize_t peek_len = recv(socks5_udp_control_socket, peek_buf, 1, MSG_PEEK | MSG_DONTWAIT);
-            if (peek_len == 0 || (peek_len < 0 && errno != EAGAIN && errno != EWOULDBLOCK))
+            char peek_byte;
+            const ssize_t peeked = recv(socks5_udp_control_socket, &peek_byte, 1, MSG_PEEK | MSG_DONTWAIT);
+            if (peeked == 0 || (peeked < 0 && errno != EAGAIN && errno != EWOULDBLOCK))
             {
-                // tcp died - tear down and reconnect immediately so real-time streams
-                // lose as few packets as possible.
                 teardown_udp_associate();
-                udp_associate_connected = establish_udp_associate();
                 continue;
             }
         }
 
-        // client sending to proxy
-        if (fds[0].revents & POLLIN)
+        for (int index = 0; index < 2; ++index)
         {
-            from_len = sizeof(from_addr);
-            ssize_t recv_len = recvfrom(udp_relay_socket, recv_buf, sizeof(recv_buf), 0, (struct sockaddr *)&from_addr, &from_len);
+            if (fds[index].fd < 0 || !(fds[index].revents & POLLIN))
+                continue;
+
+            struct sockaddr_storage from_addr{};
+            socklen_t from_len = sizeof(from_addr);
+            const ssize_t recv_len = recvfrom(fds[index].fd, recv_buf, sizeof(recv_buf), 0, (struct sockaddr*)&from_addr, &from_len);
             if (recv_len <= 0)
                 continue;
+            if (!udp_associate_connected && !establish_udp_associate())
+                continue;
 
-            // try to connect if not connected yet
-            if (!udp_associate_connected)
-            {
-                if (!establish_udp_associate())
-                    continue;
-            }
-
-            uint16_t client_port = ntohs(from_addr.sin_port);
-            const NetworkAddress client_ip = network_address_from_ipv4(from_addr.sin_addr.s_addr);
+            const NetworkAddress client_ip = network_address_from_sockaddr((const struct sockaddr*)&from_addr);
+            const uint16_t client_port = from_addr.ss_family == AF_INET6
+                ? ntohs(((struct sockaddr_in6*)&from_addr)->sin6_port)
+                : ntohs(((struct sockaddr_in*)&from_addr)->sin_port);
             NetworkAddress dest_ip;
-            uint16_t dest_port;
-
-            if (!get_connection(client_ip, client_port, &dest_ip, &dest_port) || dest_ip.family != AddressFamily::IPv4)
+            uint16_t dest_port = 0;
+            if (!get_connection(client_ip, client_port, &dest_ip, &dest_port))
                 continue;
 
-            // make sure data fits with socks5 header
-            if (recv_len > (ssize_t)(sizeof(send_buf) - 10))
+            size_t encoded_size = 0;
+            if (!encode_socks5_address(dest_ip, dest_port, send_buf + 3, sizeof(send_buf) - 3, &encoded_size))
                 continue;
+            const size_t header_size = 3 + encoded_size;
+            if (recv_len > (ssize_t)(sizeof(send_buf) - header_size))
+                continue;
+            send_buf[0] = 0;
+            send_buf[1] = 0;
+            send_buf[2] = 0;
+            memcpy(send_buf + header_size, recv_buf, recv_len);
 
-            // build socks5 udp packet header
-            send_buf[0] = 0x00; // RSV
-            send_buf[1] = 0x00; // RSV
-            send_buf[2] = 0x00; // FRAG
-            send_buf[3] = SOCKS5_ATYP_IPV4;
-            memcpy(send_buf + 4, dest_ip.bytes.data(), 4);
-            uint16_t port_net = htons(dest_port);
-            memcpy(send_buf + 8, &port_net, 2);
-            memcpy(send_buf + 10, recv_buf, recv_len);
-
-            ssize_t sent = sendto(
+            const ssize_t sent = sendto(
                 socks5_udp_send_socket,
                 send_buf,
-                10 + recv_len,
+                header_size + recv_len,
                 0,
-                (struct sockaddr *)&socks5_udp_relay_addr,
-                sizeof(socks5_udp_relay_addr));
-
+                (struct sockaddr*)&socks5_udp_relay_addr,
+                socks5_udp_relay_addr_len);
             if (sent < 0)
-            {
-                // sendto failed - proxy likely died.  Tear down, reconnect immediately
-                // and retry the current packet so real-time streams lose at most one packet.
                 teardown_udp_associate();
-                if (establish_udp_associate())
-                {
-                    udp_associate_connected = true;
-                    sendto(
-                        socks5_udp_send_socket,
-                        send_buf,
-                        (size_t)(10 + recv_len),
-                        0,
-                        (struct sockaddr *)&socks5_udp_relay_addr,
-                        sizeof(socks5_udp_relay_addr));
-                }
-            }
-            else if (socks5_udp_send_socket >= 0)
-            {
-                // After sending (especially on a freshly established association), the proxy
-                // may respond within the same poll() cycle before the socket was in fds[].
-                // Do a non-blocking check now so we don't add an extra poll() round-trip.
-                struct pollfd quick = {socks5_udp_send_socket, POLLIN, 0};
-                if (poll(&quick, 1, 0) > 0)
-                    fds[1].revents |= POLLIN;
-            }
         }
 
-        // proxy sending back to client
-        if (fds[1].fd >= 0 && (fds[1].revents & POLLIN))
+        if (fds[2].fd >= 0 && (fds[2].revents & POLLIN))
         {
-            from_len = sizeof(from_addr);
-            ssize_t recv_len = recvfrom(socks5_udp_send_socket, recv_buf, sizeof(recv_buf), 0, (struct sockaddr *)&from_addr, &from_len);
-
-            // socket error, proxy might be dead
-            if (recv_len < 0)
-            {
-                if (errno != EAGAIN && errno != EWOULDBLOCK)
-                    teardown_udp_associate();
-                continue;
-            }
-            if (recv_len < 10)
+            struct sockaddr_storage from_addr{};
+            socklen_t from_len = sizeof(from_addr);
+            const ssize_t recv_len = recvfrom(socks5_udp_send_socket, recv_buf, sizeof(recv_buf), 0, (struct sockaddr*)&from_addr, &from_len);
+            if (recv_len < 4 || recv_buf[2] != 0)
                 continue;
 
-            // we dont support fragmented packets
-            if (recv_buf[2] != 0x00)
+            NetworkAddress source_ip;
+            uint16_t source_port = 0;
+            size_t decoded_size = 0;
+            if (!decode_socks5_address(recv_buf + 3, recv_len - 3, &source_ip, &source_port, &decoded_size))
                 continue;
+            const size_t header_size = 3 + decoded_size;
 
-            // parse socks5 udp packet
-            if (recv_buf[3] != SOCKS5_ATYP_IPV4)
-                continue;
-
-            NetworkAddress src_ip;
-            src_ip.family = AddressFamily::IPv4;
-            uint16_t src_port;
-            memcpy(src_ip.bytes.data(), recv_buf + 4, 4);
-            memcpy(&src_port, recv_buf + 8, 2);
-            src_port = ntohs(src_port);
-
-            // find which client sent packet to this destination
-            // loop thru hash table looking for dest match
+            struct sockaddr_storage client_addr{};
+            socklen_t client_addr_len = 0;
+            int client_socket = -1;
             pthread_rwlock_rdlock(&conn_lock);
-
-            struct sockaddr_in client_addr;
-            bool found_client = false;
-
-            for (int hash = 0; hash < CONNECTION_HASH_SIZE; hash++)
+            for (int hash = 0; hash < CONNECTION_HASH_SIZE && client_socket < 0; ++hash)
             {
-                CONNECTION_INFO * conn = connection_hash_table[hash];
-                while (conn != nullptr)
+                for (CONNECTION_INFO* conn = connection_hash_table[hash]; conn != nullptr; conn = conn->next)
                 {
-                    if (conn->orig_dest_ip == src_ip && conn->orig_dest_port == src_port)
-                    {
-                        // found it, send response back to original client port
-                        memset(&client_addr, 0, sizeof(client_addr));
-                        client_addr.sin_family = AF_INET;
-                        client_addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-                        client_addr.sin_port = htons(conn->src_port);
-                        // Keep session alive while proxy delivers data (benign relaxed write under read lock)
-                        conn->last_activity = get_monotonic_ms();
-                        found_client = true;
-                        break;
-                    }
-                    conn = conn->next;
-                }
-                if (found_client)
+                    if (conn->orig_dest_ip != source_ip || conn->orig_dest_port != source_port)
+                        continue;
+                    conn->last_activity = get_monotonic_ms();
+                    if (!make_loopback_endpoint(conn->src_ip.family, conn->src_port, &client_addr, &client_addr_len))
+                        continue;
+                    client_socket = udp_relay_sockets[conn->src_ip.family == AddressFamily::IPv4 ? 0 : 1];
                     break;
+                }
             }
-
             pthread_rwlock_unlock(&conn_lock);
 
-            if (found_client)
-            {
-                // send unwrapped data back to client
-                ssize_t data_len = recv_len - 10;
-                sendto(udp_relay_socket, recv_buf + 10, data_len, 0, (struct sockaddr *)&client_addr, sizeof(client_addr));
-            }
+            if (client_socket >= 0)
+                sendto(client_socket, recv_buf + header_size, recv_len - header_size, 0, (struct sockaddr*)&client_addr, client_addr_len);
         }
 
-        // handle errors on udp send socket
-        if (fds[1].fd >= 0 && (fds[1].revents & (POLLHUP | POLLERR)))
-        {
+        if (fds[2].fd >= 0 && (fds[2].revents & (POLLHUP | POLLERR)))
             teardown_udp_associate();
-        }
     }
 
     teardown_udp_associate();
-    if (udp_relay_socket >= 0)
-        close(udp_relay_socket);
-
+    for (int index = 0; index < 2; ++index)
+    {
+        if (udp_relay_sockets[index] >= 0)
+        {
+            close(udp_relay_sockets[index]);
+            udp_relay_sockets[index] = -1;
+        }
+    }
     return nullptr;
 }
 
@@ -2973,7 +2879,9 @@ static void cleanup_firewall_rules(void)
     run_iptables_cmd("-t", "nat", "-D", "OUTPUT", "-p", "tcp", "-m", "mark", "--mark", "1", "-j", "REDIRECT", "--to-port", "34010");
     run_iptables_cmd("-t", "nat", "-D", "OUTPUT", "-p", "udp", "-m", "mark", "--mark", "2", "-j", "REDIRECT", "--to-port", "34011");
     run_ip6tables_cmd("-t", "mangle", "-D", "OUTPUT", "-p", "tcp", "-j", "NFQUEUE", "--queue-num", "0", nullptr, nullptr, nullptr, nullptr);
+    run_ip6tables_cmd("-t", "mangle", "-D", "OUTPUT", "-p", "udp", "-j", "NFQUEUE", "--queue-num", "0", nullptr, nullptr, nullptr, nullptr);
     run_ip6tables_cmd("-t", "nat", "-D", "OUTPUT", "-p", "tcp", "-m", "mark", "--mark", "1", "-j", "REDIRECT", "--to-port", "34010");
+    run_ip6tables_cmd("-t", "nat", "-D", "OUTPUT", "-p", "udp", "-m", "mark", "--mark", "2", "-j", "REDIRECT", "--to-port", "34011");
 }
 
 bool start(void)
@@ -3027,7 +2935,7 @@ bool start(void)
         }
     }
 
-    int ret1 = 0, ret2 = 0, ret3 = 0, ret4 = 0, ret5 = 0, ret6 = 0;
+    int ret1 = 0, ret2 = 0, ret3 = 0, ret4 = 0, ret5 = 0, ret6 = 0, ret7 = 0, ret8 = 0;
 
     nfq_h = nfq_open();
     if (!nfq_h)
@@ -3109,6 +3017,10 @@ bool start(void)
     ret6 = run_ip6tables_cmd("-t", "nat", "-A", "OUTPUT", "-p", "tcp", "-m", "mark", "--mark", "1", "-j", "REDIRECT", "--to-port", "34010");
     if (ret5 != 0 || ret6 != 0)
         log_message("failed to add ip6tables TCP rules ret1=%d ret2=%d", ret5, ret6);
+    ret7 = run_ip6tables_cmd("-t", "mangle", "-A", "OUTPUT", "-p", "udp", "-j", "NFQUEUE", "--queue-num", "0", nullptr, nullptr, nullptr, nullptr);
+    ret8 = run_ip6tables_cmd("-t", "nat", "-A", "OUTPUT", "-p", "udp", "-m", "mark", "--mark", "2", "-j", "REDIRECT", "--to-port", "34011");
+    if (ret7 != 0 || ret8 != 0)
+        log_message("failed to add ip6tables UDP rules ret1=%d ret2=%d", ret7, ret8);
 
     for (int i = 0; i < NUM_PACKET_THREADS; i++)
     {
