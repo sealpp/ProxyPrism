@@ -32,6 +32,29 @@ sudo ./output/proxyprism --check-config
 sudo ./output/proxyprism
 ```
 
+## Dual-stack Routing
+
+ProxyPrism routes IPv4 and IPv6 traffic. Rules match literal addresses, CIDR
+ranges, `*`, and the existing IPv4-only segmented wildcard/range syntax such
+as `192.0.2.*` or `192.0.2.10-20`. Hostnames and IPv6 hextet wildcards are not
+rule syntax.
+
+| Traffic | SOCKS5 | HTTP |
+| --- | --- | --- |
+| IPv4 TCP | proxy | proxy |
+| IPv6 TCP | proxy | proxy |
+| IPv4 UDP | proxy | direct |
+| IPv6 UDP | proxy | direct |
+
+Use brackets around an IPv6 proxy endpoint in `proxy.url`, for example
+`socks5://[2001:db8::1]:1080`. SOCKS5 UDP uses `UDP ASSOCIATE`; HTTP UDP is
+kept direct. IPv6 packets with extension headers, fragments, or an unknown
+next-header are accepted directly.
+
+Transparent IPv6 routing requires both `iptables` and `ip6tables` with the
+`NFQUEUE`, `mark`, and `REDIRECT` targets available. If `ip6tables` cannot
+install its rules, IPv6 traffic is not transparently proxied.
+
 ### DNS traffic
 
 DNS (port 53) follows the same rules as other traffic, so a catch-all PROXY

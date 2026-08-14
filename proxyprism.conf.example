@@ -22,7 +22,8 @@ verbose = 0
 # Supported fields per rule:
 #   process   - process name, wildcard (*), or multiple names separated by ';'
 #   hosts     - *, IPv4/IPv6 literal, IPv4/IPv6 CIDR, IPv4 wildcard/range,
-#               or multiple values separated by ';'. Hostnames are not supported.
+#               or multiple values separated by ';'. Wildcards/ranges are IPv4
+#               only; hostnames and IPv6 hextet wildcards are not supported.
 #   ports     - port, port range, or multiple values separated by ';' or ','
 #   protocol  - TCP, UDP, or BOTH
 #   action    - PROXY, DIRECT, or BLOCK
@@ -45,6 +46,14 @@ hosts = "*"
 ports = "80;443"
 protocol = "TCP"
 action = "DIRECT"
+
+# IPv6 targets use literals or standard CIDR. This also applies to UDP rules.
+# [[rules]]
+# process = "curl"
+# hosts = "2001:db8::/32"
+# ports = "443"
+# protocol = "TCP"
+# action = "PROXY"
 
 [[rules]]
 process = "*"
