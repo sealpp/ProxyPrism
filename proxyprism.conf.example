@@ -9,7 +9,8 @@
 version = "1.0"
 
 [proxy]
-# Proxy URL format: type://host:port or type://host:port:username:password
+# Proxy URL format: type://host:port or type://host:port:username:password.
+# IPv6 proxy endpoints use brackets, for example socks5://[::1]:1080.
 # Supported types: socks5, http
 url = "socks5://127.0.0.1:1080"
 
@@ -20,7 +21,8 @@ verbose = 0
 # Rules are evaluated in order and the first match wins. Use [[rules]] for each rule.
 # Supported fields per rule:
 #   process   - process name, wildcard (*), or multiple names separated by ';'
-#   hosts     - IP, hostname, wildcard, IP range, or multiple values
+#   hosts     - *, IPv4/IPv6 literal, IPv4/IPv6 CIDR, IPv4 wildcard/range,
+#               or multiple values separated by ';'. Hostnames are not supported.
 #   ports     - port, port range, or multiple values separated by ';' or ','
 #   protocol  - TCP, UDP, or BOTH
 #   action    - PROXY, DIRECT, or BLOCK
@@ -28,6 +30,7 @@ verbose = 0
 #
 # You may also use TOML arrays for process/hosts/ports, e.g.:
 #   process = ["curl", "wget"]
+#   hosts = ["2001:db8::/32", "192.0.2.*"]
 
 [[rules]]
 process = "curl"
