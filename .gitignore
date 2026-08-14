@@ -31,3 +31,6 @@ libproxyprism.so
 # Ninja / multi-config
 .ninja_*
 *.ninja
+
+# Independent internal-specification repository.
+me_ProxyPrism/
