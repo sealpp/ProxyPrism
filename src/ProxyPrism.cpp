@@ -1,4 +1,5 @@
 #include "ProxyPrism.h"
+#include "NetworkAddress.h"
 #include <arpa/inet.h>
 #include <cctype>
 #include <cerrno>
@@ -6,6 +7,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <string>
 #include <dirent.h>
 #include <fcntl.h>
 #include <libnetfilter_queue/libnetfilter_queue.h>
@@ -273,6 +275,14 @@ static inline char * skip_whitespace(char * str)
 static void format_ip_address(uint32_t ip, char * buffer, size_t size)
 {
     snprintf(buffer, size, "%d.%d.%d.%d", (ip >> 0) & 0xFF, (ip >> 8) & 0xFF, (ip >> 16) & 0xFF, (ip >> 24) & 0xFF);
+}
+
+static NetworkAddress network_address_from_ipv4(uint32_t ip)
+{
+    NetworkAddress address;
+    address.family = AddressFamily::IPv4;
+    memcpy(address.bytes.data(), &ip, 4);
+    return address;
 }
 
 typedef bool (*token_match_func)(const char * token, const void * data);
@@ -614,80 +624,12 @@ static bool get_process_name_from_pid(uint32_t pid, char * name, size_t name_siz
 
 static bool match_ip_pattern(const char * pattern, uint32_t ip)
 {
-    if (pattern == nullptr || strcmp(pattern, "*") == 0)
-        return true;
-
-    unsigned char ip_octets[4];
-    ip_octets[0] = (ip >> 0) & 0xFF;
-    ip_octets[1] = (ip >> 8) & 0xFF;
-    ip_octets[2] = (ip >> 16) & 0xFF;
-    ip_octets[3] = (ip >> 24) & 0xFF;
-
-    char pattern_copy[256];
-    strncpy(pattern_copy, pattern, sizeof(pattern_copy) - 1);
-    pattern_copy[sizeof(pattern_copy) - 1] = '\0';
-
-    char pattern_octets[4][16];
-    int octet_count = 0;
-    int char_idx = 0;
-
-    for (size_t i = 0; i <= strlen(pattern_copy) && octet_count < 4; i++)
-    {
-        if (pattern_copy[i] == '.' || pattern_copy[i] == '\0')
-        {
-            pattern_octets[octet_count][char_idx] = '\0';
-            octet_count++;
-            char_idx = 0;
-            if (pattern_copy[i] == '\0')
-                break;
-        }
-        else
-        {
-            if (char_idx < 15)
-                pattern_octets[octet_count][char_idx++] = pattern_copy[i];
-        }
-    }
-
-    if (octet_count != 4)
-        return false;
-
-    for (int i = 0; i < 4; i++)
-    {
-        if (strcmp(pattern_octets[i], "*") == 0)
-            continue;
-
-        char * dash = strchr(pattern_octets[i], '-');
-        if (dash != nullptr)
-        {
-            int start = safe_atoi(pattern_octets[i]);
-            int end = safe_atoi(dash + 1);
-            if (ip_octets[i] < start || ip_octets[i] > end)
-                return false;
-        }
-        else
-        {
-            int pattern_val = safe_atoi(pattern_octets[i]);
-            if (pattern_val != ip_octets[i])
-                return false;
-        }
-    }
-    return true;
+    return pattern != nullptr && match_host_pattern(pattern, network_address_from_ipv4(ip));
 }
 
 static bool match_port_pattern(const char * pattern, uint16_t port)
 {
-    if (pattern == nullptr || strcmp(pattern, "*") == 0)
-        return true;
-
-    const char * dash = strchr(pattern, '-');
-    if (dash != nullptr)
-    {
-        int start_port = safe_atoi(pattern);
-        int end_port = safe_atoi(dash + 1);
-        return (port >= start_port && port <= end_port);
-    }
-
-    return (port == safe_atoi(pattern));
+    return pattern != nullptr && match_port_list(pattern, port);
 }
 
 static bool ip_match_wrapper(const char * token, const void * data)
@@ -2566,6 +2508,15 @@ uint32_t add_rule(
     if (process_name == nullptr || process_name[0] == '\0')
         return 0;
 
+    const char * hosts = target_hosts != nullptr && target_hosts[0] != '\0' ? target_hosts : "*";
+    const char * ports = target_ports != nullptr && target_ports[0] != '\0' ? target_ports : "*";
+    std::string rule_error;
+    if (!validate_host_list(hosts, &rule_error) || !validate_port_list(ports, &rule_error))
+    {
+        log_message("invalid rule for process %s: %s", process_name, rule_error.c_str());
+        return 0;
+    }
+
     PROCESS_RULE * rule = (PROCESS_RULE *)malloc(sizeof(PROCESS_RULE));
     if (rule == nullptr)
         return 0;
@@ -2619,8 +2570,18 @@ uint32_t add_rule(
     rule->enabled = true;
 
     pthread_rwlock_wrlock(&rules_lock);
-    rule->next = rules_list;
-    rules_list = rule;
+    rule->next = nullptr;
+    if (rules_list == nullptr)
+    {
+        rules_list = rule;
+    }
+    else
+    {
+        PROCESS_RULE * tail = rules_list;
+        while (tail->next != nullptr)
+            tail = tail->next;
+        tail->next = rule;
+    }
     update_has_active_rules();
     pthread_rwlock_unlock(&rules_lock);
 

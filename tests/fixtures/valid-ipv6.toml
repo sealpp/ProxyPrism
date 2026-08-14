@@ -1,0 +1,16 @@
+[proxy]
+url = "socks5://127.0.0.1:1080"
+
+[[rules]]
+process = "first"
+hosts = "2001:db8::/32"
+ports = "443"
+protocol = "TCP"
+action = "DIRECT"
+
+[[rules]]
+process = "second"
+hosts = ["192.0.2.*", "2001:db8:1::/48"]
+ports = "80;443"
+protocol = "BOTH"
+action = "PROXY"

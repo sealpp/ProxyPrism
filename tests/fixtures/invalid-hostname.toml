@@ -1,0 +1,9 @@
+[proxy]
+url = "socks5://127.0.0.1:1080"
+
+[[rules]]
+process = "curl"
+hosts = "example.com"
+ports = "443"
+protocol = "TCP"
+action = "PROXY"

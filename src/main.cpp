@@ -5,6 +5,7 @@
 #include <cstring>
 #include <unistd.h>
 #include "ProxyPrism.h"
+#include "NetworkAddress.h"
 #include "tomlc17.h"
 
 using namespace proxyprism;
@@ -374,7 +375,7 @@ static bool load_config(
     toml_datum_t rules_arr = toml_seek(top, "rules");
     if (rules_arr.type == TOML_ARRAY)
     {
-        for (int i = 0; i < rules_arr.u.arr.size && *num_rules < max_rules; i++)
+        for (int i = 0; i < rules_arr.u.arr.size; i++)
         {
             toml_datum_t rule = rules_arr.u.arr.elem[i];
             if (rule.type != TOML_TABLE)
@@ -385,12 +386,33 @@ static bool load_config(
             if (!enabled)
                 continue;
 
+            if (*num_rules >= max_rules)
+            {
+                fprintf(stderr, "ERROR: Config has more than %d enabled rules\n", max_rules);
+                toml_free(result);
+                return false;
+            }
+
             ProxyRule * r = &rules[*num_rules];
             int rule_index = *num_rules + 1;
 
             get_rule_field(rule, "process", r->process_name, sizeof(r->process_name), "*");
             get_rule_field(rule, "hosts", r->target_hosts, sizeof(r->target_hosts), "*");
             get_rule_field(rule, "ports", r->target_ports, sizeof(r->target_ports), "*");
+
+            std::string rule_error;
+            if (!validate_host_list(r->target_hosts, &rule_error))
+            {
+                fprintf(stderr, "ERROR: Config rule %d: invalid hosts: %s\n", rule_index, rule_error.c_str());
+                toml_free(result);
+                return false;
+            }
+            if (!validate_port_list(r->target_ports, &rule_error))
+            {
+                fprintf(stderr, "ERROR: Config rule %d: invalid ports: %s\n", rule_index, rule_error.c_str());
+                toml_free(result);
+                return false;
+            }
 
             char protocol[16];
             char action[16];

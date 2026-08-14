@@ -33,6 +33,10 @@ target_link_libraries(proxyprism
         Threads::Threads
 )
 
+if(PROXYPRISM_BUILD_TESTS)
+    target_compile_definitions(proxyprism PRIVATE PROXYPRISM_BUILD_TESTS)
+endif()
+
 if(BUILD_STATIC_EXE)
     # Fully static link.  This will emit a glibc getaddrinfo warning that
     # we cannot avoid on glibc-based systems.
