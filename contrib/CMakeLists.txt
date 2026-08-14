@@ -84,3 +84,12 @@ target_include_directories(tomlc17
     PUBLIC
         ${CMAKE_CURRENT_SOURCE_DIR}/tomlc17/src
 )
+
+# GoogleTest is a test-only submodule. Keep it out of production builds and
+# disable its own test/install targets.
+if(PROXYPRISM_BUILD_TESTS)
+    set(INSTALL_GTEST OFF CACHE BOOL "" FORCE)
+    set(gtest_build_gmock OFF CACHE BOOL "" FORCE)
+    set(gtest_build_tests OFF CACHE BOOL "" FORCE)
+    add_subdirectory(googletest EXCLUDE_FROM_ALL)
+endif()

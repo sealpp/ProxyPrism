@@ -23,6 +23,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 # Options
 option(BUILD_STATIC_EXE "Build a single fully-static proxyprism executable" OFF)
+option(PROXYPRISM_BUILD_TESTS "Build ProxyPrism tests" OFF)
 
 # Global hardening for project code; contrib libraries override with -w.
 set(PB_HARDENING_FLAGS
@@ -40,6 +41,11 @@ find_package(Threads REQUIRED)
 
 add_subdirectory(contrib)
 add_subdirectory(src)
+
+if(PROXYPRISM_BUILD_TESTS)
+    include(CTest)
+    add_subdirectory(tests)
+endif()
 
 # Install ancillary files alongside the binaries.
 install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/proxyprism.conf.example"

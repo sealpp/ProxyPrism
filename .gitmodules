@@ -10,3 +10,6 @@
 [submodule "tomlc17"]
 	path = contrib/tomlc17
 	url = https://github.com/cktan/tomlc17
+[submodule "contrib/googletest"]
+	path = contrib/googletest
+	url = https://github.com/google/googletest.git
