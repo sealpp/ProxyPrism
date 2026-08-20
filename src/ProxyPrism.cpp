@@ -1,5 +1,6 @@
 #include "ProxyPrism.h"
 #include "NetworkAddress.h"
+#include "FakeIPStore.h"
 #include <arpa/inet.h>
 #include <cctype>
 #include <cerrno>
@@ -34,6 +35,10 @@ namespace proxyprism {
 
 constexpr std::uint16_t LOCAL_PROXY_PORT = 34010;
 constexpr std::uint16_t LOCAL_UDP_RELAY_PORT = 34011;
+constexpr std::uint16_t LOCAL_DNS_PROXY_PORT = 34053;
+constexpr uint32_t BYPASS_REDIRECT_MARK = 0xFF;
+constexpr std::uint32_t FAKE_IP_MARK_TCP = 3;
+constexpr std::uint32_t FAKE_IP_MARK_UDP = 4;
 constexpr std::size_t MAX_PROCESS_NAME = 256;
 constexpr std::uint32_t PID_CACHE_SIZE = 1024;
 constexpr std::uint64_t PID_CACHE_TTL_MS = 1000;
@@ -213,6 +218,7 @@ typedef struct PROCESS_RULE
 #define SOCKS5_CMD_CONNECT 0x01
 #define SOCKS5_CMD_UDP_ASSOCIATE 0x03
 #define SOCKS5_ATYP_IPV4 0x01
+#define SOCKS5_ATYP_DOMAIN 0x03
 #define SOCKS5_ATYP_IPV6 0x04
 #define SOCKS5_AUTH_NONE 0x00
 
@@ -224,6 +230,9 @@ typedef struct CONNECTION_INFO
     uint16_t orig_dest_port;
     bool is_tracked;
     uint64_t last_activity;
+    RuleAction action;
+    char domain[256];
+    bool is_fake_ip;
     struct CONNECTION_INFO * next;
 } CONNECTION_INFO;
 
@@ -260,6 +269,9 @@ typedef struct
     int client_socket;
     NetworkAddress orig_dest_ip;
     uint16_t orig_dest_port;
+    RuleAction action;
+    char domain[256];
+    bool is_fake_ip;
 } connection_config_t;
 
 typedef struct
@@ -278,6 +290,12 @@ static PID_CACHE_ENTRY * pid_cache[PID_CACHE_SIZE] = {nullptr};
 static bool g_has_active_rules = false;
 static bool running = false;
 static uint32_t g_current_process_id = 0;
+
+static FakeIPStore g_fake_ip_store;
+static char g_dns_nameserver[256] = "";
+static struct sockaddr_storage g_dns_nameserver_addr;
+static socklen_t g_dns_nameserver_addr_len = 0;
+static pthread_t dns_proxy_thread = 0;
 
 // udp relay stuff
 static int udp_relay_sockets[2] = {-1, -1};
@@ -490,21 +508,41 @@ static uint64_t get_monotonic_ms(void)
 
 static uint32_t parse_ipv4(const char * ip);
 static uint32_t resolve_hostname(const char * hostname);
-static int socks5_connect(int s, const NetworkAddress& dest_ip, uint16_t dest_port);
+static int socks5_connect(int s, const NetworkAddress& dest_ip, uint16_t dest_port, const char* domain);
 static bool match_process_pattern(const char * pattern, const char * process_name);
 static bool match_process_list(const char * process_list, const char * process_name);
-static int http_connect(int s, const NetworkAddress& dest_ip, uint16_t dest_port);
+static int http_connect(int s, const NetworkAddress& dest_ip, uint16_t dest_port, const char* domain);
 static void * local_proxy_server(void * arg);
 static void * connection_handler(void * arg);
 static void * transfer_handler(void * arg);
 static void * packet_processor(void * arg);
 static uint32_t get_process_id_from_connection(const NetworkAddress& src_ip, uint16_t src_port, bool is_udp);
 static bool get_process_name_from_pid(uint32_t pid, char * name, size_t name_size);
-static RuleAction match_rule(const char * process_name, const NetworkAddress& dest_ip, uint16_t dest_port, bool is_udp);
 static RuleAction
-check_process_rule(const NetworkAddress& src_ip, uint16_t src_port, const NetworkAddress& dest_ip, uint16_t dest_port, bool is_udp, uint32_t * out_pid);
-static void add_connection(uint16_t src_port, const NetworkAddress& src_ip, const NetworkAddress& dest_ip, uint16_t dest_port);
-static bool get_connection(const NetworkAddress& src_ip, uint16_t src_port, NetworkAddress* dest_ip, uint16_t* dest_port);
+check_process_rule(
+    const NetworkAddress& src_ip,
+    uint16_t src_port,
+    const NetworkAddress& dest_ip,
+    uint16_t dest_port,
+    bool is_udp,
+    uint32_t* out_pid,
+    const char* domain = nullptr);
+static void add_connection(
+    uint16_t src_port,
+    const NetworkAddress& src_ip,
+    const NetworkAddress& dest_ip,
+    uint16_t dest_port,
+    RuleAction action,
+    const char* domain,
+    bool is_fake_ip);
+static bool get_connection(
+    const NetworkAddress& src_ip,
+    uint16_t src_port,
+    NetworkAddress* dest_ip,
+    uint16_t* dest_port,
+    RuleAction* action = nullptr,
+    char* domain = nullptr,
+    bool* is_fake_ip = nullptr);
 static bool is_connection_tracked(const NetworkAddress& src_ip, uint16_t src_port);
 static void cleanup_stale_connections(void);
 static bool is_connection_already_logged(uint32_t pid, const NetworkAddress& dest_ip, uint16_t dest_port, RuleAction action);
@@ -860,10 +898,11 @@ static bool is_broadcast_or_multicast(const NetworkAddress& ip)
     return loopback || ip.bytes[0] == 0xff || (ip.bytes[0] == 0xfe && (ip.bytes[1] & 0xc0) == 0x80);
 }
 
-static RuleAction match_rule(const char * process_name, const NetworkAddress& dest_ip, uint16_t dest_port, bool is_udp)
+static RuleAction match_rule(const char * process_name, const NetworkAddress& dest_ip, uint16_t dest_port, bool is_udp, const char* domain)
 {
     PROCESS_RULE * rule = rules_list;
     PROCESS_RULE * wildcard_rule = nullptr;
+    const std::string_view domain_view = domain != nullptr ? domain : "";
 
     while (rule != nullptr)
     {
@@ -896,7 +935,7 @@ static RuleAction match_rule(const char * process_name, const NetworkAddress& de
 
             if (has_ip_filter || has_port_filter)
             {
-                if (match_host_list(rule->target_hosts, dest_ip) && match_port_list(rule->target_ports, dest_port))
+                if (match_target_list(rule->target_hosts, dest_ip, domain_view) && match_port_list(rule->target_ports, dest_port))
                 {
                     return rule->action;
                 }
@@ -914,7 +953,7 @@ static RuleAction match_rule(const char * process_name, const NetworkAddress& de
 
         if (match_process_list(rule->process_name, process_name))
         {
-            if (match_host_list(rule->target_hosts, dest_ip) && match_port_list(rule->target_ports, dest_port))
+            if (match_target_list(rule->target_hosts, dest_ip, domain_view) && match_port_list(rule->target_ports, dest_port))
             {
                 return rule->action;
             }
@@ -938,7 +977,8 @@ check_process_rule(
     const NetworkAddress& dest_ip,
     uint16_t dest_port,
     bool is_udp,
-    uint32_t* out_pid)
+    uint32_t* out_pid,
+    const char* domain)
 {
     uint32_t pid;
     char process_name[MAX_PROCESS_NAME];
@@ -958,7 +998,7 @@ check_process_rule(
         return RuleAction::DIRECT;
 
     pthread_rwlock_rdlock(&rules_lock);
-    RuleAction action = match_rule(process_name, dest_ip, dest_port, is_udp);
+    RuleAction action = match_rule(process_name, dest_ip, dest_port, is_udp, domain);
     pthread_rwlock_unlock(&rules_lock);
 
     if (action == RuleAction::PROXY && is_udp && g_proxy_type == ProxyType::HTTP)
@@ -973,7 +1013,7 @@ check_process_rule(
     return action;
 }
 
-static int socks5_connect(int s, const NetworkAddress& dest_ip, uint16_t dest_port)
+static int socks5_connect(int s, const NetworkAddress& dest_ip, uint16_t dest_port, const char* domain)
 {
     unsigned char buf[SOCKS5_BUFFER_SIZE];
     ssize_t len;
@@ -1041,10 +1081,27 @@ static int socks5_connect(int s, const NetworkAddress& dest_ip, uint16_t dest_po
     buf[0] = SOCKS5_VERSION;
     buf[1] = SOCKS5_CMD_CONNECT;
     buf[2] = 0x00;
-    size_t encoded_size = 0;
-    if (!encode_socks5_address(dest_ip, dest_port, buf + 3, sizeof(buf) - 3, &encoded_size))
-        return -1;
-    const size_t request_size = 3 + encoded_size;
+    size_t request_size = 3;
+
+    if (domain != nullptr && domain[0] != '\0')
+    {
+        const size_t dlen = strlen(domain);
+        if (dlen > 255 || dlen + 4 + request_size > sizeof(buf))
+            return -1;
+        buf[3] = SOCKS5_ATYP_DOMAIN;
+        buf[4] = static_cast<unsigned char>(dlen);
+        memcpy(buf + 5, domain, dlen);
+        const uint16_t network_port = htons(dest_port);
+        memcpy(buf + 5 + dlen, &network_port, sizeof(network_port));
+        request_size = 5 + dlen + 2;
+    }
+    else
+    {
+        size_t encoded_size = 0;
+        if (!encode_socks5_address(dest_ip, dest_port, buf + 3, sizeof(buf) - 3, &encoded_size))
+            return -1;
+        request_size += encoded_size;
+    }
     if (send(s, buf, request_size, MSG_NOSIGNAL) != (ssize_t)request_size)
     {
         log_message("socks5 failed to send connect request");
@@ -1071,16 +1128,27 @@ static int socks5_connect(int s, const NetworkAddress& dest_ip, uint16_t dest_po
     return 0;
 }
 
-static int http_connect(int s, const NetworkAddress& dest_ip, uint16_t dest_port)
+static int http_connect(int s, const NetworkAddress& dest_ip, uint16_t dest_port, const char* domain)
 {
     char buf[HTTP_BUFFER_SIZE];
-    char dest_ip_str[INET6_ADDRSTRLEN];
-    format_network_address(dest_ip, dest_ip_str, sizeof(dest_ip_str));
-    char authority[INET6_ADDRSTRLEN + 16];
-    if (dest_ip.family == AddressFamily::IPv6)
-        snprintf(authority, sizeof(authority), "[%s]:%u", dest_ip_str, dest_port);
+    char authority[INET6_ADDRSTRLEN + 256 + 16];
+    if (domain != nullptr && domain[0] != '\0')
+    {
+        const bool has_colon = strchr(domain, ':') != nullptr;
+        if (has_colon && domain[0] != '[')
+            snprintf(authority, sizeof(authority), "[%s]:%u", domain, dest_port);
+        else
+            snprintf(authority, sizeof(authority), "%s:%u", domain, dest_port);
+    }
     else
-        snprintf(authority, sizeof(authority), "%s:%u", dest_ip_str, dest_port);
+    {
+        char dest_ip_str[INET6_ADDRSTRLEN];
+        format_network_address(dest_ip, dest_ip_str, sizeof(dest_ip_str));
+        if (dest_ip.family == AddressFamily::IPv6)
+            snprintf(authority, sizeof(authority), "[%s]:%u", dest_ip_str, dest_port);
+        else
+            snprintf(authority, sizeof(authority), "%s:%u", dest_ip_str, dest_port);
+    }
 
     int len = snprintf(
         buf,
@@ -1156,56 +1224,115 @@ static void * connection_handler(void * arg)
     int client_sock = config->client_socket;
     NetworkAddress dest_ip = config->orig_dest_ip;
     uint16_t dest_port = config->orig_dest_port;
-    int proxy_sock;
+    const RuleAction action = config->action;
+    const bool is_fake_ip = config->is_fake_ip;
+    const char* domain = (config->domain[0] != '\0') ? config->domain : nullptr;
+    int target_sock = -1;
 
     delete config;
 
+    if (action == RuleAction::BLOCK)
+    {
+        close(client_sock);
+        return nullptr;
+    }
+
+    configure_tcp_socket(client_sock, 1048576, 60000);
+
+    if (action == RuleAction::DIRECT)
+    {
+        // DIRECT for fake-IP: resolve the original domain and connect directly.
+        if (!is_fake_ip || domain == nullptr)
+        {
+            close(client_sock);
+            return nullptr;
+        }
+
+        struct sockaddr_storage real_addr{};
+        socklen_t real_addr_len = 0;
+        if (!resolve_endpoint(domain, dest_port, SOCK_STREAM, &real_addr, &real_addr_len))
+        {
+            log_message("direct fake-ip: failed to resolve %s", domain);
+            close(client_sock);
+            return nullptr;
+        }
+
+        target_sock = socket(real_addr.ss_family, SOCK_STREAM | SOCK_CLOEXEC, 0);
+        if (target_sock < 0)
+        {
+            close(client_sock);
+            return nullptr;
+        }
+
+        configure_tcp_socket(target_sock, 1048576, 60000);
+
+        if (connect(target_sock, (struct sockaddr *)&real_addr, real_addr_len) < 0)
+        {
+            close(client_sock);
+            close(target_sock);
+            return nullptr;
+        }
+
+        // Setup transfer and return
+        transfer_config_t * transfer_config = (transfer_config_t *)malloc(sizeof(transfer_config_t));
+        if (transfer_config == nullptr)
+        {
+            close(client_sock);
+            close(target_sock);
+            return nullptr;
+        }
+        transfer_config->from_socket = client_sock;
+        transfer_config->to_socket = target_sock;
+        transfer_handler((void *)transfer_config);
+        return nullptr;
+    }
+
+    // PROXY path
     if (g_proxy_addr_len == 0)
     {
         close(client_sock);
         return nullptr;
     }
 
-    proxy_sock = socket(g_proxy_addr.ss_family, SOCK_STREAM | SOCK_CLOEXEC, 0);
-    if (proxy_sock < 0)
+    target_sock = socket(g_proxy_addr.ss_family, SOCK_STREAM | SOCK_CLOEXEC, 0);
+    if (target_sock < 0)
     {
         close(client_sock);
         return nullptr;
     }
 
-    configure_tcp_socket(proxy_sock, 1048576, 60000);
-    configure_tcp_socket(client_sock, 1048576, 60000);
+    configure_tcp_socket(target_sock, 1048576, 60000);
 
-    if (connect(proxy_sock, (struct sockaddr *)&g_proxy_addr, g_proxy_addr_len) < 0)
+    if (connect(target_sock, (struct sockaddr *)&g_proxy_addr, g_proxy_addr_len) < 0)
     {
         close(client_sock);
-        close(proxy_sock);
+        close(target_sock);
         return nullptr;
     }
 
     // do handshake blocking
     if (g_proxy_type == ProxyType::SOCKS5)
     {
-        if (socks5_connect(proxy_sock, dest_ip, dest_port) != 0)
+        if (socks5_connect(target_sock, dest_ip, dest_port, domain) != 0)
         {
             close(client_sock);
-            close(proxy_sock);
+            close(target_sock);
             return nullptr;
         }
     }
     else if (g_proxy_type == ProxyType::HTTP)
     {
-        if (http_connect(proxy_sock, dest_ip, dest_port) != 0)
+        if (http_connect(target_sock, dest_ip, dest_port, domain) != 0)
         {
             close(client_sock);
-            close(proxy_sock);
+            close(target_sock);
             return nullptr;
         }
     }
     // Disable timeout for data transfer phase
     struct timeval zero_timeout = {0, 0};
-    setsockopt(proxy_sock, SOL_SOCKET, SO_RCVTIMEO, &zero_timeout, sizeof(zero_timeout));
-    setsockopt(proxy_sock, SOL_SOCKET, SO_SNDTIMEO, &zero_timeout, sizeof(zero_timeout));
+    setsockopt(target_sock, SOL_SOCKET, SO_RCVTIMEO, &zero_timeout, sizeof(zero_timeout));
+    setsockopt(target_sock, SOL_SOCKET, SO_SNDTIMEO, &zero_timeout, sizeof(zero_timeout));
     setsockopt(client_sock, SOL_SOCKET, SO_RCVTIMEO, &zero_timeout, sizeof(zero_timeout));
     setsockopt(client_sock, SOL_SOCKET, SO_SNDTIMEO, &zero_timeout, sizeof(zero_timeout));
 
@@ -1214,10 +1341,10 @@ static void * connection_handler(void * arg)
     int keepidle = 300; // 5 minutes in seconds
     int keepintvl = 1; // 1 second interval
     int keepcnt = 5; // 5 probes before dropping
-    setsockopt(proxy_sock, SOL_SOCKET, SO_KEEPALIVE, &keepalive, sizeof(keepalive));
-    setsockopt(proxy_sock, SOL_TCP, TCP_KEEPIDLE, &keepidle, sizeof(keepidle));
-    setsockopt(proxy_sock, SOL_TCP, TCP_KEEPINTVL, &keepintvl, sizeof(keepintvl));
-    setsockopt(proxy_sock, SOL_TCP, TCP_KEEPCNT, &keepcnt, sizeof(keepcnt));
+    setsockopt(target_sock, SOL_SOCKET, SO_KEEPALIVE, &keepalive, sizeof(keepalive));
+    setsockopt(target_sock, SOL_TCP, TCP_KEEPIDLE, &keepidle, sizeof(keepidle));
+    setsockopt(target_sock, SOL_TCP, TCP_KEEPINTVL, &keepintvl, sizeof(keepintvl));
+    setsockopt(target_sock, SOL_TCP, TCP_KEEPCNT, &keepcnt, sizeof(keepcnt));
     setsockopt(client_sock, SOL_SOCKET, SO_KEEPALIVE, &keepalive, sizeof(keepalive));
     setsockopt(client_sock, SOL_TCP, TCP_KEEPIDLE, &keepidle, sizeof(keepidle));
     setsockopt(client_sock, SOL_TCP, TCP_KEEPINTVL, &keepintvl, sizeof(keepintvl));
@@ -1228,12 +1355,12 @@ static void * connection_handler(void * arg)
     if (transfer_config == nullptr)
     {
         close(client_sock);
-        close(proxy_sock);
+        close(target_sock);
         return nullptr;
     }
 
     transfer_config->from_socket = client_sock;
-    transfer_config->to_socket = proxy_sock;
+    transfer_config->to_socket = target_sock;
 
     // transfer data both ways in this thread
     transfer_handler((void *)transfer_config);
@@ -1582,7 +1709,17 @@ static void * local_proxy_server(void * arg)
 
             connection_config_t* conn_config = new connection_config_t;
             conn_config->client_socket = client_sock;
-            if (!get_connection(client_ip, client_port, &conn_config->orig_dest_ip, &conn_config->orig_dest_port))
+            conn_config->domain[0] = '\0';
+            conn_config->is_fake_ip = false;
+            conn_config->action = RuleAction::PROXY;
+            if (!get_connection(
+                    client_ip,
+                    client_port,
+                    &conn_config->orig_dest_ip,
+                    &conn_config->orig_dest_port,
+                    &conn_config->action,
+                    conn_config->domain,
+                    &conn_config->is_fake_ip))
             {
                 close(client_sock);
                 delete conn_config;
@@ -2006,7 +2143,20 @@ static int packet_callback(struct nfq_q_handle * qh, struct nfgenmsg * nfmsg, st
         if (!(tcph->syn && !tcph->ack))
             return nfq_set_verdict(qh, id, NF_ACCEPT, 0, nullptr);
 
-        action = check_process_rule(src_ip, src_port, dest_ip, dest_port, false, &pid);
+        const bool dest_is_fake_ip = g_fake_ip_store.contains(dest_ip);
+        char fake_domain[256] = "";
+        const char* domain_for_rule = nullptr;
+
+        if (dest_is_fake_ip)
+        {
+            auto mapped = g_fake_ip_store.lookup_domain(dest_ip);
+            if (!mapped)
+                return nfq_set_verdict(qh, id, NF_DROP, 0, nullptr); // stale fake ip, force re-resolve
+            snprintf(fake_domain, sizeof(fake_domain), "%s", mapped->c_str());
+            domain_for_rule = fake_domain;
+        }
+
+        action = check_process_rule(src_ip, src_port, dest_ip, dest_port, false, &pid, domain_for_rule);
 
         if (action == RuleAction::PROXY && is_broadcast_or_multicast(dest_ip))
             action = RuleAction::DIRECT;
@@ -2051,6 +2201,17 @@ static int packet_callback(struct nfq_q_handle * qh, struct nfgenmsg * nfmsg, st
             }
         }
 
+        if (dest_is_fake_ip)
+        {
+            if (action == RuleAction::BLOCK)
+                return nfq_set_verdict(qh, id, NF_DROP, 0, nullptr);
+
+            // fake-IP connections always go to the local relay so it can resolve/connect
+            add_connection(src_port, src_ip, dest_ip, dest_port, action, fake_domain, true);
+            uint32_t mark = FAKE_IP_MARK_TCP;
+            return nfq_set_verdict2(qh, id, NF_ACCEPT, mark, 0, nullptr);
+        }
+
         if (action == RuleAction::DIRECT)
             return nfq_set_verdict(qh, id, NF_ACCEPT, 0, nullptr);
         else if (action == RuleAction::BLOCK)
@@ -2058,7 +2219,7 @@ static int packet_callback(struct nfq_q_handle * qh, struct nfgenmsg * nfmsg, st
         else if (action == RuleAction::PROXY)
         {
             // store connection info
-            add_connection(src_port, src_ip, dest_ip, dest_port);
+            add_connection(src_port, src_ip, dest_ip, dest_port, action, nullptr, false);
 
             // mark packet so nat table REDIRECT rule will catch it
             uint32_t mark = 1;
@@ -2080,7 +2241,20 @@ static int packet_callback(struct nfq_q_handle * qh, struct nfgenmsg * nfmsg, st
         if (is_connection_tracked(src_ip, src_port))
             return nfq_set_verdict(qh, id, NF_ACCEPT, 0, nullptr);
 
-        action = check_process_rule(src_ip, src_port, dest_ip, dest_port, true, &pid);
+        const bool dest_is_fake_ip = g_fake_ip_store.contains(dest_ip);
+        char fake_domain[256] = "";
+        const char* domain_for_rule = nullptr;
+
+        if (dest_is_fake_ip)
+        {
+            auto mapped = g_fake_ip_store.lookup_domain(dest_ip);
+            if (!mapped)
+                return nfq_set_verdict(qh, id, NF_DROP, 0, nullptr);
+            snprintf(fake_domain, sizeof(fake_domain), "%s", mapped->c_str());
+            domain_for_rule = fake_domain;
+        }
+
+        action = check_process_rule(src_ip, src_port, dest_ip, dest_port, true, &pid, domain_for_rule);
 
         if (action == RuleAction::PROXY && is_broadcast_or_multicast(dest_ip))
             action = RuleAction::DIRECT;
@@ -2134,6 +2308,16 @@ static int packet_callback(struct nfq_q_handle * qh, struct nfgenmsg * nfmsg, st
             }
         }
 
+        if (dest_is_fake_ip)
+        {
+            if (action == RuleAction::BLOCK)
+                return nfq_set_verdict(qh, id, NF_DROP, 0, nullptr);
+
+            add_connection(src_port, src_ip, dest_ip, dest_port, action, fake_domain, true);
+            uint32_t mark = FAKE_IP_MARK_UDP;
+            return nfq_set_verdict2(qh, id, NF_ACCEPT, mark, 0, nullptr);
+        }
+
         if (action == RuleAction::DIRECT)
             return nfq_set_verdict(qh, id, NF_ACCEPT, 0, nullptr);
         else if (action == RuleAction::BLOCK)
@@ -2141,7 +2325,7 @@ static int packet_callback(struct nfq_q_handle * qh, struct nfgenmsg * nfmsg, st
         else if (action == RuleAction::PROXY)
         {
             // UDP proxy via SOCKS5 UDP ASSOCIATE
-            add_connection(src_port, src_ip, dest_ip, dest_port);
+            add_connection(src_port, src_ip, dest_ip, dest_port, action, nullptr, false);
 
             // Mark UDP packet for redirect to local UDP relay (port 34011)
             uint32_t mark = 2; // Use mark=2 for UDP (mark=1 is for TCP)
@@ -2181,7 +2365,13 @@ static uint32_t connection_hash(const NetworkAddress& src_ip, uint16_t port)
 }
 
 static void add_connection(
-    uint16_t src_port, const NetworkAddress& src_ip, const NetworkAddress& dest_ip, uint16_t dest_port)
+    uint16_t src_port,
+    const NetworkAddress& src_ip,
+    const NetworkAddress& dest_ip,
+    uint16_t dest_port,
+    RuleAction action,
+    const char* domain,
+    bool is_fake_ip)
 {
     uint32_t hash = connection_hash(src_ip, src_port);
     pthread_rwlock_wrlock(&conn_lock);
@@ -2196,6 +2386,12 @@ static void add_connection(
             conn->src_ip = src_ip;
             conn->is_tracked = true;
             conn->last_activity = get_monotonic_ms();
+            conn->action = action;
+            conn->is_fake_ip = is_fake_ip;
+            if (domain != nullptr)
+                snprintf(conn->domain, sizeof(conn->domain), "%s", domain);
+            else
+                conn->domain[0] = '\0';
             pthread_rwlock_unlock(&conn_lock);
             return;
         }
@@ -2209,13 +2405,26 @@ static void add_connection(
     new_conn->orig_dest_port = dest_port;
     new_conn->is_tracked = true;
     new_conn->last_activity = get_monotonic_ms();
+    new_conn->action = action;
+    new_conn->is_fake_ip = is_fake_ip;
+    if (domain != nullptr)
+        snprintf(new_conn->domain, sizeof(new_conn->domain), "%s", domain);
+    else
+        new_conn->domain[0] = '\0';
     new_conn->next = connection_hash_table[hash];
     connection_hash_table[hash] = new_conn;
 
     pthread_rwlock_unlock(&conn_lock);
 }
 
-static bool get_connection(const NetworkAddress& src_ip, uint16_t src_port, NetworkAddress* dest_ip, uint16_t* dest_port)
+static bool get_connection(
+    const NetworkAddress& src_ip,
+    uint16_t src_port,
+    NetworkAddress* dest_ip,
+    uint16_t* dest_port,
+    RuleAction* action,
+    char* domain,
+    bool* is_fake_ip)
 {
     uint32_t hash = connection_hash(src_ip, src_port);
     pthread_rwlock_rdlock(&conn_lock);
@@ -2228,6 +2437,12 @@ static bool get_connection(const NetworkAddress& src_ip, uint16_t src_port, Netw
             *dest_ip = conn->orig_dest_ip;
             *dest_port = conn->orig_dest_port;
             conn->last_activity = get_monotonic_ms(); // benign race on timestamp
+            if (action != nullptr)
+                *action = conn->action;
+            if (is_fake_ip != nullptr)
+                *is_fake_ip = conn->is_fake_ip;
+            if (domain != nullptr)
+                snprintf(domain, 256, "%s", conn->domain[0] != '\0' ? conn->domain : "");
             pthread_rwlock_unlock(&conn_lock);
             return true;
         }
@@ -3183,7 +3398,7 @@ int test_connection(const char * target_host, uint16_t target_port, char * resul
 
     if (g_proxy_type == ProxyType::SOCKS5)
     {
-        if (socks5_connect(test_sock, target_ip, target_port) != 0)
+        if (socks5_connect(test_sock, target_ip, target_port, target_host) != 0)
         {
             snprintf(temp_buffer, sizeof(temp_buffer), "error socks5 handshake failed\n");
             strncat(result_buffer, temp_buffer, buffer_size - strlen(result_buffer) - 1);
@@ -3194,7 +3409,7 @@ int test_connection(const char * target_host, uint16_t target_port, char * resul
     }
     else
     {
-        if (http_connect(test_sock, target_ip, target_port) != 0)
+        if (http_connect(test_sock, target_ip, target_port, target_host) != 0)
         {
             snprintf(temp_buffer, sizeof(temp_buffer), "error http connect failed\n");
             strncat(result_buffer, temp_buffer, buffer_size - strlen(result_buffer) - 1);
