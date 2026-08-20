@@ -32,6 +32,9 @@ public:
     // Clear all mappings.
     void clear();
 
+    // True if at least one pool has been successfully configured.
+    bool has_pools() const;
+
     // Pool constants used by callers.
     static constexpr const char* DEFAULT_IPV4_POOL = "198.18.0.0/15";
     static constexpr const char* DEFAULT_IPV6_POOL = "fc00::/18";

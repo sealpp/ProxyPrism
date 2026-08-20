@@ -233,4 +233,10 @@ void FakeIPStore::clear()
     ipv6_pool_.current = 0;
 }
 
+bool FakeIPStore::has_pools() const
+{
+    std::shared_lock lock(lock_);
+    return ipv4_pool_.valid || ipv6_pool_.valid;
+}
+
 } // namespace proxyprism

@@ -14,6 +14,20 @@ version = "1.0"
 # Supported types: socks5, http
 url = "socks5://127.0.0.1:1080"
 
+[dns]
+# Real DNS server used for:
+#   - forwarding non-A/AAAA queries from the local FakeDNS listener
+#   - resolving original domains for DIRECT fake-IP connections
+# If omitted, ProxyPrism reads the first nameserver from /etc/resolv.conf.
+nameserver = "8.8.8.8"
+
+[fakeip]
+# IPv4 and IPv6 pools used for synthetic fake-IP allocation.
+# Defaults are 198.18.0.0/15 and fc00::/18. Only change these if the default
+# pools conflict with your network.
+ipv4 = "198.18.0.0/15"
+ipv6 = "fc00::/18"
+
 [options]
 # Logging verbosity: 0 = silent, 1 = logs, 2 = connections, 3 = both.
 verbose = 0
@@ -22,8 +36,8 @@ verbose = 0
 # Supported fields per rule:
 #   process   - process name, wildcard (*), or multiple names separated by ';'
 #   hosts     - *, IPv4/IPv6 literal, IPv4/IPv6 CIDR, IPv4 wildcard/range,
-#               or multiple values separated by ';'. Wildcards/ranges are IPv4
-#               only; hostnames and IPv6 hextet wildcards are not supported.
+#               domain glob with * and ? (case-insensitive), or multiple values
+#               separated by ';'
 #   ports     - port, port range, or multiple values separated by ';' or ','
 #   protocol  - TCP, UDP, or BOTH
 #   action    - PROXY, DIRECT, or BLOCK
@@ -31,7 +45,7 @@ verbose = 0
 #
 # You may also use TOML arrays for process/hosts/ports, e.g.:
 #   process = ["curl", "wget"]
-#   hosts = ["2001:db8::/32", "192.0.2.*"]
+#   hosts = ["2001:db8::/32", "192.0.2.*", "*.example.com"]
 
 [[rules]]
 process = "curl"
@@ -47,29 +61,12 @@ ports = "80;443"
 protocol = "TCP"
 action = "DIRECT"
 
-# IPv6 targets use literals or standard CIDR. This also applies to UDP rules.
-# [[rules]]
-# process = "curl"
-# hosts = "2001:db8::/32"
-# ports = "443"
-# protocol = "TCP"
-# action = "PROXY"
-
 [[rules]]
-process = "*"
-hosts = "*"
-ports = "53"
-protocol = "UDP"
+process = "curl"
+hosts = "*.example.com;example.org"
+ports = "443"
+protocol = "TCP"
 action = "PROXY"
-
-# Example: block a specific application.
-# [[rules]]
-# process = "malware"
-# hosts = "*"
-# ports = "*"
-# protocol = "BOTH"
-# action = "BLOCK"
-# enabled = true
 
 # Standard pattern: keep DNS direct while proxying everything else.
 # Rules are matched in order, so the DNS rule MUST come before the catch-all.

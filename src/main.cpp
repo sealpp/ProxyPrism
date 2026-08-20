@@ -363,6 +363,12 @@ static bool load_config(
     char * proxy_url,
     size_t proxy_url_size,
     int * verbose_level,
+    char * dns_nameserver,
+    size_t dns_nameserver_size,
+    char * fakeip_ipv4,
+    size_t fakeip_ipv4_size,
+    char * fakeip_ipv6,
+    size_t fakeip_ipv6_size,
     ProxyRule * rules,
     int * num_rules,
     int max_rules)
@@ -384,6 +390,39 @@ static bool load_config(
         {
             strncpy(proxy_url, s, proxy_url_size - 1);
             proxy_url[proxy_url_size - 1] = '\0';
+        }
+    }
+
+    toml_datum_t dns_ns = toml_seek(top, "dns.nameserver");
+    if (dns_ns.type == TOML_STRING)
+    {
+        const char * s = toml_string_ptr(dns_ns);
+        if (s != nullptr)
+        {
+            strncpy(dns_nameserver, s, dns_nameserver_size - 1);
+            dns_nameserver[dns_nameserver_size - 1] = '\0';
+        }
+    }
+
+    toml_datum_t fakeip4 = toml_seek(top, "fakeip.ipv4");
+    if (fakeip4.type == TOML_STRING)
+    {
+        const char * s = toml_string_ptr(fakeip4);
+        if (s != nullptr)
+        {
+            strncpy(fakeip_ipv4, s, fakeip_ipv4_size - 1);
+            fakeip_ipv4[fakeip_ipv4_size - 1] = '\0';
+        }
+    }
+
+    toml_datum_t fakeip6 = toml_seek(top, "fakeip.ipv6");
+    if (fakeip6.type == TOML_STRING)
+    {
+        const char * s = toml_string_ptr(fakeip6);
+        if (s != nullptr)
+        {
+            strncpy(fakeip_ipv6, s, fakeip_ipv6_size - 1);
+            fakeip_ipv6[fakeip_ipv6_size - 1] = '\0';
         }
     }
 
@@ -503,13 +542,29 @@ int main(int argc, char * argv[])
     }
 
     char proxy_url[512] = "socks5://127.0.0.1:4444";
+    char dns_nameserver[256] = "";
+    char fakeip_ipv4[64] = "";
+    char fakeip_ipv6[128] = "";
     ProxyRule rules[MAX_RULES];
     int num_rules = 0;
 
     // The configuration file is mandatory
     if (access(config_path, F_OK) == 0)
     {
-        if (!load_config(config_path, proxy_url, sizeof(proxy_url), &verbose_level, rules, &num_rules, MAX_RULES))
+        if (!load_config(
+                config_path,
+                proxy_url,
+                sizeof(proxy_url),
+                &verbose_level,
+                dns_nameserver,
+                sizeof(dns_nameserver),
+                fakeip_ipv4,
+                sizeof(fakeip_ipv4),
+                fakeip_ipv6,
+                sizeof(fakeip_ipv6),
+                rules,
+                &num_rules,
+                MAX_RULES))
             return 1;
     }
     else
@@ -543,6 +598,11 @@ int main(int argc, char * argv[])
 
         if (proxy_username[0] != '\0')
             printf("Proxy Auth: %s:***\n", proxy_username);
+
+        if (dns_nameserver[0] != '\0')
+            printf("DNS nameserver: %s\n", dns_nameserver);
+        if (fakeip_ipv4[0] != '\0' || fakeip_ipv6[0] != '\0')
+            printf("Fake-IP pools: %s, %s\n", fakeip_ipv4[0] ? fakeip_ipv4 : "default", fakeip_ipv6[0] ? fakeip_ipv6 : "default");
 
         if (num_rules > 0)
         {
@@ -608,12 +668,28 @@ int main(int argc, char * argv[])
     if (proxy_username[0] != '\0')
         printf("Proxy Auth: %s:***\n", proxy_username);
 
+    if (dns_nameserver[0] != '\0')
+        printf("DNS nameserver: %s\n", dns_nameserver);
+
     // setup proxy
     if (!set_proxy_config(
             proxy_type, proxy_host, proxy_port, proxy_username[0] ? proxy_username : "", proxy_password[0] ? proxy_password : ""))
     {
         fprintf(stderr, "ERROR: Failed to set proxy configuration\n");
         return 1;
+    }
+
+    // configure fake IP pools before DNS and rules
+    if (!set_fake_ip_pools(fakeip_ipv4[0] ? fakeip_ipv4 : nullptr, fakeip_ipv6[0] ? fakeip_ipv6 : nullptr))
+    {
+        fprintf(stderr, "ERROR: Failed to set fake-IP pools\n");
+        return 1;
+    }
+
+    // configure upstream nameserver used by the fake-DNS proxy and DIRECT resolution
+    if (!set_dns_nameserver(dns_nameserver[0] ? dns_nameserver : nullptr))
+    {
+        fprintf(stderr, "WARNING: Failed to load DNS nameserver; direct fake-IP resolution may not work\n");
     }
 
     // add rules

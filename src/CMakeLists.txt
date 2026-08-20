@@ -3,6 +3,7 @@
 add_library(proxyprism_address_rules STATIC
     NetworkAddress.cpp
     FakeIPStore.cpp
+    DNSProxy.cpp
 )
 
 target_include_directories(proxyprism_address_rules

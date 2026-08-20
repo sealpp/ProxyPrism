@@ -1,6 +1,8 @@
 #include "ProxyPrism.h"
 #include "NetworkAddress.h"
 #include "FakeIPStore.h"
+#include "ProcessLookup.h"
+#include "DNSProxy.h"
 #include <arpa/inet.h>
 #include <cctype>
 #include <cerrno>
@@ -94,11 +96,11 @@ static int run_iptables_cmd(
     const char * arg7,
     const char * arg8,
     const char * arg9,
-    const char * arg10,
-    const char * arg11,
-    const char * arg12,
-    const char * arg13,
-    const char * arg14)
+    const char * arg10 = nullptr,
+    const char * arg11 = nullptr,
+    const char * arg12 = nullptr,
+    const char * arg13 = nullptr,
+    const char * arg14 = nullptr)
 {
     // build argv array skipping null args
     const char * argv[17];
@@ -147,11 +149,11 @@ static int run_ip6tables_cmd(
     const char * arg7,
     const char * arg8,
     const char * arg9,
-    const char * arg10,
-    const char * arg11,
-    const char * arg12,
-    const char * arg13,
-    const char * arg14)
+    const char * arg10 = nullptr,
+    const char * arg11 = nullptr,
+    const char * arg12 = nullptr,
+    const char * arg13 = nullptr,
+    const char * arg14 = nullptr)
 {
     const char * argv[17];
     int i = 0;
@@ -295,7 +297,7 @@ static FakeIPStore g_fake_ip_store;
 static char g_dns_nameserver[256] = "";
 static struct sockaddr_storage g_dns_nameserver_addr;
 static socklen_t g_dns_nameserver_addr_len = 0;
-static pthread_t dns_proxy_thread = 0;
+static DNSProxy* g_dns_proxy = nullptr;
 
 // udp relay stuff
 static int udp_relay_sockets[2] = {-1, -1};
@@ -351,22 +353,6 @@ static void format_ip_address(uint32_t ip, char * buffer, size_t size)
     snprintf(buffer, size, "%d.%d.%d.%d", (ip >> 0) & 0xFF, (ip >> 8) & 0xFF, (ip >> 16) & 0xFF, (ip >> 24) & 0xFF);
 }
 
-static NetworkAddress network_address_from_ipv4(uint32_t ip)
-{
-    NetworkAddress address;
-    address.family = AddressFamily::IPv4;
-    memcpy(address.bytes.data(), &ip, 4);
-    return address;
-}
-
-static NetworkAddress network_address_from_ipv6(const struct in6_addr& ip)
-{
-    NetworkAddress address;
-    address.family = AddressFamily::IPv6;
-    memcpy(address.bytes.data(), &ip, 16);
-    return address;
-}
-
 static int socket_family(AddressFamily family)
 {
     return family == AddressFamily::IPv4 ? AF_INET : AF_INET6;
@@ -381,13 +367,6 @@ static void format_network_address(const NetworkAddress& address, char* buffer, 
 {
     const std::string text = format_network_address(address);
     snprintf(buffer, size, "%s", text.c_str());
-}
-
-static NetworkAddress network_address_from_sockaddr(const struct sockaddr* address)
-{
-    if (address->sa_family == AF_INET6)
-        return network_address_from_ipv6(((const struct sockaddr_in6*)address)->sin6_addr);
-    return network_address_from_ipv4(((const struct sockaddr_in*)address)->sin_addr.s_addr);
 }
 
 static bool resolve_endpoint(const char* host, uint16_t port, int socktype, struct sockaddr_storage* address, socklen_t* address_len)
@@ -516,7 +495,7 @@ static void * local_proxy_server(void * arg);
 static void * connection_handler(void * arg);
 static void * transfer_handler(void * arg);
 static void * packet_processor(void * arg);
-static uint32_t get_process_id_from_connection(const NetworkAddress& src_ip, uint16_t src_port, bool is_udp);
+uint32_t get_process_id_from_connection(const NetworkAddress& src_ip, uint16_t src_port, bool is_udp);
 static bool get_process_name_from_pid(uint32_t pid, char * name, size_t name_size);
 static RuleAction
 check_process_rule(
@@ -623,7 +602,7 @@ static uint32_t find_pid_from_inode(unsigned long target_inode, uint32_t uid_hin
 
 // fast pid lookup using netlink
 // tcp uses exact query, udp needs dump
-static uint32_t get_process_id_from_connection(const NetworkAddress& src_ip, uint16_t src_port, bool is_udp)
+uint32_t get_process_id_from_connection(const NetworkAddress& src_ip, uint16_t src_port, bool is_udp)
 {
     uint32_t cached_pid = get_cached_pid(src_ip, src_port, is_udp);
     if (cached_pid != 0)
@@ -3033,6 +3012,56 @@ bool set_proxy_config(ProxyType type, const char * proxy_ip, uint16_t proxy_port
     return true;
 }
 
+bool set_dns_nameserver(const char* nameserver)
+{
+    if (nameserver == nullptr || nameserver[0] == '\0')
+    {
+        // Load default from /etc/resolv.conf first nameserver line.
+        FILE* fp = fopen("/etc/resolv.conf", "r");
+        if (fp)
+        {
+            char line[512];
+            while (fgets(line, sizeof(line), fp))
+            {
+                char server[256];
+                if (sscanf(line, "nameserver %255s", server) == 1)
+                {
+                    if (resolve_endpoint(server, 53, SOCK_DGRAM, &g_dns_nameserver_addr, &g_dns_nameserver_addr_len))
+                    {
+                        snprintf(g_dns_nameserver, sizeof(g_dns_nameserver), "%s", server);
+                        fclose(fp);
+                        log_message("dns nameserver loaded from resolv.conf: %s", server);
+                        return true;
+                    }
+                }
+            }
+            fclose(fp);
+        }
+        return false;
+    }
+
+    if (!resolve_endpoint(nameserver, 53, SOCK_DGRAM, &g_dns_nameserver_addr, &g_dns_nameserver_addr_len))
+        return false;
+
+    snprintf(g_dns_nameserver, sizeof(g_dns_nameserver), "%s", nameserver);
+    log_message("dns nameserver configured: %s", nameserver);
+    return true;
+}
+
+bool set_fake_ip_pools(const char* ipv4_pool, const char* ipv6_pool)
+{
+    const char* v4 = (ipv4_pool != nullptr && ipv4_pool[0] != '\0') ? ipv4_pool : FakeIPStore::DEFAULT_IPV4_POOL;
+    const char* v6 = (ipv6_pool != nullptr && ipv6_pool[0] != '\0') ? ipv6_pool : FakeIPStore::DEFAULT_IPV6_POOL;
+
+    if (!g_fake_ip_store.set_ipv4_pool(v4))
+        return false;
+    if (!g_fake_ip_store.set_ipv6_pool(v6))
+        return false;
+
+    log_message("fake-ip pools: %s, %s", v4, v6);
+    return true;
+}
+
 void set_log_callback(LogCallback callback)
 {
     g_log_callback = callback;
@@ -3055,14 +3084,36 @@ void clear_connection_logs(void)
 
 static void cleanup_firewall_rules(void)
 {
-    run_iptables_cmd("-t", "mangle", "-D", "OUTPUT", "-p", "tcp", "-j", "NFQUEUE", "--queue-num", "0", nullptr, nullptr, nullptr, nullptr);
-    run_iptables_cmd("-t", "mangle", "-D", "OUTPUT", "-p", "udp", "-j", "NFQUEUE", "--queue-num", "0", nullptr, nullptr, nullptr, nullptr);
+    // mangle cleanup
+    run_iptables_cmd("-t", "mangle", "-D", "OUTPUT", "-p", "tcp", "--dport", "53", "-j", "ACCEPT");
+    run_iptables_cmd("-t", "mangle", "-D", "OUTPUT", "-p", "udp", "--dport", "53", "-j", "ACCEPT");
+    run_iptables_cmd("-t", "mangle", "-D", "OUTPUT", "-m", "mark", "--mark", "0xFF", "-j", "ACCEPT");
+    run_iptables_cmd("-t", "mangle", "-D", "OUTPUT", "-p", "tcp", "-j", "NFQUEUE", "--queue-num", "0");
+    run_iptables_cmd("-t", "mangle", "-D", "OUTPUT", "-p", "udp", "-j", "NFQUEUE", "--queue-num", "0");
+
+    // nat cleanup
+    run_iptables_cmd("-t", "nat", "-D", "OUTPUT", "-m", "mark", "--mark", "0xFF", "-j", "RETURN");
+    run_iptables_cmd("-t", "nat", "-D", "OUTPUT", "-p", "udp", "--dport", "53", "-j", "REDIRECT", "--to-port", "34053");
+    run_iptables_cmd("-t", "nat", "-D", "OUTPUT", "-p", "tcp", "--dport", "53", "-j", "REDIRECT", "--to-port", "34053");
     run_iptables_cmd("-t", "nat", "-D", "OUTPUT", "-p", "tcp", "-m", "mark", "--mark", "1", "-j", "REDIRECT", "--to-port", "34010");
     run_iptables_cmd("-t", "nat", "-D", "OUTPUT", "-p", "udp", "-m", "mark", "--mark", "2", "-j", "REDIRECT", "--to-port", "34011");
-    run_ip6tables_cmd("-t", "mangle", "-D", "OUTPUT", "-p", "tcp", "-j", "NFQUEUE", "--queue-num", "0", nullptr, nullptr, nullptr, nullptr);
-    run_ip6tables_cmd("-t", "mangle", "-D", "OUTPUT", "-p", "udp", "-j", "NFQUEUE", "--queue-num", "0", nullptr, nullptr, nullptr, nullptr);
+    run_iptables_cmd("-t", "nat", "-D", "OUTPUT", "-p", "tcp", "-m", "mark", "--mark", "3", "-j", "REDIRECT", "--to-port", "34010");
+    run_iptables_cmd("-t", "nat", "-D", "OUTPUT", "-p", "udp", "-m", "mark", "--mark", "4", "-j", "REDIRECT", "--to-port", "34011");
+
+    // IPv6
+    run_ip6tables_cmd("-t", "mangle", "-D", "OUTPUT", "-p", "tcp", "--dport", "53", "-j", "ACCEPT");
+    run_ip6tables_cmd("-t", "mangle", "-D", "OUTPUT", "-p", "udp", "--dport", "53", "-j", "ACCEPT");
+    run_ip6tables_cmd("-t", "mangle", "-D", "OUTPUT", "-m", "mark", "--mark", "0xFF", "-j", "ACCEPT");
+    run_ip6tables_cmd("-t", "mangle", "-D", "OUTPUT", "-p", "tcp", "-j", "NFQUEUE", "--queue-num", "0");
+    run_ip6tables_cmd("-t", "mangle", "-D", "OUTPUT", "-p", "udp", "-j", "NFQUEUE", "--queue-num", "0");
+
+    run_ip6tables_cmd("-t", "nat", "-D", "OUTPUT", "-m", "mark", "--mark", "0xFF", "-j", "RETURN");
+    run_ip6tables_cmd("-t", "nat", "-D", "OUTPUT", "-p", "udp", "--dport", "53", "-j", "REDIRECT", "--to-port", "34053");
+    run_ip6tables_cmd("-t", "nat", "-D", "OUTPUT", "-p", "tcp", "--dport", "53", "-j", "REDIRECT", "--to-port", "34053");
     run_ip6tables_cmd("-t", "nat", "-D", "OUTPUT", "-p", "tcp", "-m", "mark", "--mark", "1", "-j", "REDIRECT", "--to-port", "34010");
     run_ip6tables_cmd("-t", "nat", "-D", "OUTPUT", "-p", "udp", "-m", "mark", "--mark", "2", "-j", "REDIRECT", "--to-port", "34011");
+    run_ip6tables_cmd("-t", "nat", "-D", "OUTPUT", "-p", "tcp", "-m", "mark", "--mark", "3", "-j", "REDIRECT", "--to-port", "34010");
+    run_ip6tables_cmd("-t", "nat", "-D", "OUTPUT", "-p", "udp", "-m", "mark", "--mark", "4", "-j", "REDIRECT", "--to-port", "34011");
 }
 
 bool start(void)
@@ -3072,6 +3123,22 @@ bool start(void)
 
     running = true;
     g_current_process_id = getpid();
+
+    if (!g_fake_ip_store.has_pools())
+        set_fake_ip_pools(nullptr, nullptr);
+
+    if (g_dns_nameserver[0] == '\0')
+        set_dns_nameserver(nullptr);
+
+    g_dns_proxy = new DNSProxy(g_fake_ip_store, g_dns_nameserver_addr, g_dns_nameserver_addr_len, g_current_process_id);
+    if (!g_dns_proxy->start(LOCAL_DNS_PROXY_PORT))
+    {
+        log_message("failed to start dns proxy");
+        delete g_dns_proxy;
+        g_dns_proxy = nullptr;
+        running = false;
+        return false;
+    }
 
     // Ignore SIGPIPE - send() on a closed socket must return EPIPE, not kill the process
     signal(SIGPIPE, SIG_IGN);
@@ -3116,7 +3183,7 @@ bool start(void)
         }
     }
 
-    int ret1 = 0, ret2 = 0, ret3 = 0, ret4 = 0, ret5 = 0, ret6 = 0, ret7 = 0, ret8 = 0;
+    (void)LOCAL_DNS_PROXY_PORT;
 
     nfq_h = nfq_open();
     if (!nfq_h)
@@ -3170,38 +3237,37 @@ bool start(void)
 
     // setup iptables rules for packet interception - USE MANGLE table so it runs BEFORE nat
     log_message("setting up iptables rules");
-    // mangle table runs before nat, so we can mark packets there
-    ret1 = run_iptables_cmd("-t", "mangle", "-A", "OUTPUT", "-p", "tcp", "-j", "NFQUEUE", "--queue-num", "0", nullptr, nullptr, nullptr, nullptr);
-    ret2 = run_iptables_cmd("-t", "mangle", "-A", "OUTPUT", "-p", "udp", "-j", "NFQUEUE", "--queue-num", "0", nullptr, nullptr, nullptr, nullptr);
+    // DNS traffic (port 53) is passed to the local DNS proxy directly, no NFQUEUE decision.
+    // Mark 0xFF traffic is the proxy's own DNS forwarder and must bypass NFQUEUE.
+    run_iptables_cmd("-t", "mangle", "-A", "OUTPUT", "-p", "tcp", "--dport", "53", "-j", "ACCEPT");
+    run_iptables_cmd("-t", "mangle", "-A", "OUTPUT", "-p", "udp", "--dport", "53", "-j", "ACCEPT");
+    run_iptables_cmd("-t", "mangle", "-A", "OUTPUT", "-m", "mark", "--mark", "0xFF", "-j", "ACCEPT");
+    run_iptables_cmd("-t", "mangle", "-A", "OUTPUT", "-p", "tcp", "-j", "NFQUEUE", "--queue-num", "0");
+    run_iptables_cmd("-t", "mangle", "-A", "OUTPUT", "-p", "udp", "-j", "NFQUEUE", "--queue-num", "0");
 
-    if (ret1 != 0 || ret2 != 0)
-    {
-        log_message("failed to add iptables rules ret1=%d ret2=%d", ret1, ret2);
-    }
-    else
-    {
-        log_message("iptables nfqueue rules added successfully");
-    }
+    // nat redirect: proxy's own marked traffic is not redirected; then DNS, then proxy/fake-ip marks.
+    run_iptables_cmd("-t", "nat", "-A", "OUTPUT", "-m", "mark", "--mark", "0xFF", "-j", "RETURN");
+    run_iptables_cmd("-t", "nat", "-A", "OUTPUT", "-p", "udp", "--dport", "53", "-j", "REDIRECT", "--to-port", "34053");
+    run_iptables_cmd("-t", "nat", "-A", "OUTPUT", "-p", "tcp", "--dport", "53", "-j", "REDIRECT", "--to-port", "34053");
+    run_iptables_cmd("-t", "nat", "-A", "OUTPUT", "-p", "tcp", "-m", "mark", "--mark", "1", "-j", "REDIRECT", "--to-port", "34010");
+    run_iptables_cmd("-t", "nat", "-A", "OUTPUT", "-p", "udp", "-m", "mark", "--mark", "2", "-j", "REDIRECT", "--to-port", "34011");
+    run_iptables_cmd("-t", "nat", "-A", "OUTPUT", "-p", "tcp", "-m", "mark", "--mark", "3", "-j", "REDIRECT", "--to-port", "34010");
+    run_iptables_cmd("-t", "nat", "-A", "OUTPUT", "-p", "udp", "-m", "mark", "--mark", "4", "-j", "REDIRECT", "--to-port", "34011");
 
-    // setup nat redirect for marked packets
-    ret3 = run_iptables_cmd("-t", "nat", "-A", "OUTPUT", "-p", "tcp", "-m", "mark", "--mark", "1", "-j", "REDIRECT", "--to-port", "34010");
-    ret4 = run_iptables_cmd("-t", "nat", "-A", "OUTPUT", "-p", "udp", "-m", "mark", "--mark", "2", "-j", "REDIRECT", "--to-port", "34011");
-    if (ret3 != 0 || ret4 != 0)
-    {
-        log_message("failed to add nat redirect rules");
-    }
+    // IPv6
+    run_ip6tables_cmd("-t", "mangle", "-A", "OUTPUT", "-p", "tcp", "--dport", "53", "-j", "ACCEPT");
+    run_ip6tables_cmd("-t", "mangle", "-A", "OUTPUT", "-p", "udp", "--dport", "53", "-j", "ACCEPT");
+    run_ip6tables_cmd("-t", "mangle", "-A", "OUTPUT", "-m", "mark", "--mark", "0xFF", "-j", "ACCEPT");
+    run_ip6tables_cmd("-t", "mangle", "-A", "OUTPUT", "-p", "tcp", "-j", "NFQUEUE", "--queue-num", "0");
+    run_ip6tables_cmd("-t", "mangle", "-A", "OUTPUT", "-p", "udp", "-j", "NFQUEUE", "--queue-num", "0");
 
-    (void)ret3;
-    (void)ret4;
-
-    ret5 = run_ip6tables_cmd("-t", "mangle", "-A", "OUTPUT", "-p", "tcp", "-j", "NFQUEUE", "--queue-num", "0", nullptr, nullptr, nullptr, nullptr);
-    ret6 = run_ip6tables_cmd("-t", "nat", "-A", "OUTPUT", "-p", "tcp", "-m", "mark", "--mark", "1", "-j", "REDIRECT", "--to-port", "34010");
-    if (ret5 != 0 || ret6 != 0)
-        log_message("failed to add ip6tables TCP rules ret1=%d ret2=%d", ret5, ret6);
-    ret7 = run_ip6tables_cmd("-t", "mangle", "-A", "OUTPUT", "-p", "udp", "-j", "NFQUEUE", "--queue-num", "0", nullptr, nullptr, nullptr, nullptr);
-    ret8 = run_ip6tables_cmd("-t", "nat", "-A", "OUTPUT", "-p", "udp", "-m", "mark", "--mark", "2", "-j", "REDIRECT", "--to-port", "34011");
-    if (ret7 != 0 || ret8 != 0)
-        log_message("failed to add ip6tables UDP rules ret1=%d ret2=%d", ret7, ret8);
+    run_ip6tables_cmd("-t", "nat", "-A", "OUTPUT", "-m", "mark", "--mark", "0xFF", "-j", "RETURN");
+    run_ip6tables_cmd("-t", "nat", "-A", "OUTPUT", "-p", "udp", "--dport", "53", "-j", "REDIRECT", "--to-port", "34053");
+    run_ip6tables_cmd("-t", "nat", "-A", "OUTPUT", "-p", "tcp", "--dport", "53", "-j", "REDIRECT", "--to-port", "34053");
+    run_ip6tables_cmd("-t", "nat", "-A", "OUTPUT", "-p", "tcp", "-m", "mark", "--mark", "1", "-j", "REDIRECT", "--to-port", "34010");
+    run_ip6tables_cmd("-t", "nat", "-A", "OUTPUT", "-p", "udp", "-m", "mark", "--mark", "2", "-j", "REDIRECT", "--to-port", "34011");
+    run_ip6tables_cmd("-t", "nat", "-A", "OUTPUT", "-p", "tcp", "-m", "mark", "--mark", "3", "-j", "REDIRECT", "--to-port", "34010");
+    run_ip6tables_cmd("-t", "nat", "-A", "OUTPUT", "-p", "udp", "-m", "mark", "--mark", "4", "-j", "REDIRECT", "--to-port", "34011");
 
     for (int i = 0; i < NUM_PACKET_THREADS; i++)
     {
@@ -3234,6 +3300,12 @@ start_fail:
         pthread_cancel(udp_relay_thread);
         pthread_join(udp_relay_thread, nullptr);
         udp_relay_thread = 0;
+    }
+    if (g_dns_proxy != nullptr)
+    {
+        g_dns_proxy->stop();
+        delete g_dns_proxy;
+        g_dns_proxy = nullptr;
     }
     return false;
 }
@@ -3292,6 +3364,15 @@ bool stop(void)
         pthread_join(cleanup_thread, nullptr);
         cleanup_thread = 0;
     }
+
+    if (g_dns_proxy != nullptr)
+    {
+        g_dns_proxy->stop();
+        delete g_dns_proxy;
+        g_dns_proxy = nullptr;
+    }
+
+    g_fake_ip_store.clear();
 
     // Free all connections in hash table
     pthread_rwlock_wrlock(&conn_lock);

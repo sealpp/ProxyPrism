@@ -64,6 +64,9 @@ bool set_proxy_config(
     const char* username,
     const char* password);
 
+bool set_dns_nameserver(const char* nameserver);
+bool set_fake_ip_pools(const char* ipv4_pool, const char* ipv6_pool);
+
 void set_log_callback(LogCallback callback);
 
 void set_connection_callback(ConnectionCallback callback);
