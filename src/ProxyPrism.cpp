@@ -526,7 +526,13 @@ static bool get_connection(
     char* domain = nullptr,
     bool* is_fake_ip = nullptr,
     NetworkAddress* resolved_dest_ip = nullptr,
-    uint16_t* resolved_dest_port = nullptr);
+    uint16_t* resolved_dest_port = nullptr,
+    bool* resolved = nullptr);
+static bool set_resolved_connection(
+    const NetworkAddress& src_ip,
+    uint16_t src_port,
+    const NetworkAddress& resolved_ip,
+    uint16_t resolved_port);
 static bool is_connection_tracked(const NetworkAddress& src_ip, uint16_t src_port);
 static void cleanup_stale_connections(void);
 static bool is_connection_already_logged(uint32_t pid, const NetworkAddress& dest_ip, uint16_t dest_port, RuleAction action);
@@ -1901,6 +1907,35 @@ static int create_udp_relay_listener(AddressFamily family)
     return relay_socket;
 }
 
+static bool send_udp_payload_to_client(const NetworkAddress& source_ip, uint16_t source_port, const uint8_t* payload, size_t payload_len)
+{
+    struct sockaddr_storage client_addr{};
+    socklen_t client_addr_len = 0;
+    int client_socket = -1;
+
+    pthread_rwlock_rdlock(&conn_lock);
+    for (int hash = 0; hash < CONNECTION_HASH_SIZE && client_socket < 0; ++hash)
+    {
+        for (CONNECTION_INFO* conn = connection_hash_table[hash]; conn != nullptr; conn = conn->next)
+        {
+            if (!conn->resolved || conn->resolved_dest_ip != source_ip || conn->resolved_dest_port != source_port)
+                continue;
+            conn->last_activity = get_monotonic_ms();
+            if (!make_loopback_endpoint(conn->src_ip.family, conn->src_port, &client_addr, &client_addr_len))
+                continue;
+            client_socket = udp_relay_sockets[conn->src_ip.family == AddressFamily::IPv4 ? 0 : 1];
+            break;
+        }
+    }
+    pthread_rwlock_unlock(&conn_lock);
+
+    if (client_socket < 0)
+        return false;
+
+    sendto(client_socket, payload, payload_len, 0, (struct sockaddr*)&client_addr, client_addr_len);
+    return true;
+}
+
 static void * udp_relay_server(void * arg)
 {
     (void)arg;
@@ -1954,38 +1989,110 @@ static void * udp_relay_server(void * arg)
             const ssize_t recv_len = recvfrom(fds[index].fd, recv_buf, sizeof(recv_buf), 0, (struct sockaddr*)&from_addr, &from_len);
             if (recv_len <= 0)
                 continue;
-            if (!udp_associate_connected && !establish_udp_associate())
-                continue;
 
-            const NetworkAddress client_ip = network_address_from_sockaddr((const struct sockaddr*)&from_addr);
-            const uint16_t client_port = from_addr.ss_family == AF_INET6
+            const NetworkAddress from_ip = network_address_from_sockaddr((const struct sockaddr*)&from_addr);
+            const uint16_t from_port = from_addr.ss_family == AF_INET6
                 ? ntohs(((struct sockaddr_in6*)&from_addr)->sin6_port)
                 : ntohs(((struct sockaddr_in*)&from_addr)->sin_port);
-            NetworkAddress dest_ip;
-            uint16_t dest_port = 0;
-            if (!get_connection(client_ip, client_port, &dest_ip, &dest_port))
-                continue;
 
-            size_t encoded_size = 0;
-            if (!encode_socks5_address(dest_ip, dest_port, send_buf + 3, sizeof(send_buf) - 3, &encoded_size))
-                continue;
-            const size_t header_size = 3 + encoded_size;
-            if (recv_len > (ssize_t)(sizeof(send_buf) - header_size))
-                continue;
-            send_buf[0] = 0;
-            send_buf[1] = 0;
-            send_buf[2] = 0;
-            memcpy(send_buf + header_size, recv_buf, recv_len);
+            NetworkAddress orig_dest_ip;
+            uint16_t orig_dest_port = 0;
+            NetworkAddress resolved_dest_ip;
+            uint16_t resolved_dest_port = 0;
+            RuleAction action = RuleAction::DIRECT;
+            char domain[256] = {};
+            bool is_fake_ip = false;
+            bool resolved = false;
 
-            const ssize_t sent = sendto(
-                socks5_udp_send_socket,
-                send_buf,
-                header_size + recv_len,
-                0,
-                (struct sockaddr*)&socks5_udp_relay_addr,
-                socks5_udp_relay_addr_len);
-            if (sent < 0)
-                teardown_udp_associate();
+            if (get_connection(from_ip, from_port, &orig_dest_ip, &orig_dest_port, &action, domain, &is_fake_ip, &resolved_dest_ip, &resolved_dest_port, &resolved))
+            {
+                // Local client packet redirected from NAT.
+                if (action == RuleAction::BLOCK)
+                    continue;
+
+                if (is_fake_ip && !resolved)
+                {
+                    if (domain[0] == '\0')
+                    {
+                        auto restored = g_fake_ip_store.lookup_domain(orig_dest_ip);
+                        if (restored.has_value())
+                            snprintf(domain, sizeof(domain), "%s", restored->c_str());
+                    }
+
+                    if (domain[0] == '\0')
+                    {
+                        log_message("udp relay: fake-IP without domain, dropping");
+                        continue;
+                    }
+
+                    struct sockaddr_storage real_addr{};
+                    socklen_t real_addr_len = 0;
+                    if (g_dns_proxy == nullptr || !g_dns_proxy->resolve_domain(domain, orig_dest_port, &real_addr, &real_addr_len, orig_dest_ip.family))
+                    {
+                        log_message("udp relay: failed to resolve %s", domain);
+                        continue;
+                    }
+
+                    resolved_dest_ip = network_address_from_sockaddr((const struct sockaddr*)&real_addr);
+                    resolved_dest_port = orig_dest_port;
+                    set_resolved_connection(from_ip, from_port, resolved_dest_ip, resolved_dest_port);
+                    resolved = true;
+                }
+
+                if (!resolved)
+                {
+                    resolved_dest_ip = orig_dest_ip;
+                    resolved_dest_port = orig_dest_port;
+                }
+
+                if (action == RuleAction::PROXY)
+                {
+                    if (!udp_associate_connected && !establish_udp_associate())
+                        continue;
+
+                    size_t encoded_size = 0;
+                    if (!encode_socks5_address(resolved_dest_ip, resolved_dest_port, send_buf + 3, sizeof(send_buf) - 3, &encoded_size))
+                        continue;
+
+                    const size_t header_size = 3 + encoded_size;
+                    if (recv_len > (ssize_t)(sizeof(send_buf) - header_size))
+                        continue;
+
+                    send_buf[0] = 0;
+                    send_buf[1] = 0;
+                    send_buf[2] = 0;
+                    memcpy(send_buf + header_size, recv_buf, recv_len);
+
+                    const ssize_t sent = sendto(
+                        socks5_udp_send_socket,
+                        send_buf,
+                        header_size + recv_len,
+                        0,
+                        (struct sockaddr*)&socks5_udp_relay_addr,
+                        socks5_udp_relay_addr_len);
+                    if (sent < 0)
+                        teardown_udp_associate();
+                }
+                else // DIRECT
+                {
+                    struct sockaddr_storage real_addr{};
+                    socklen_t real_addr_len = 0;
+                    if (!make_endpoint(resolved_dest_ip, resolved_dest_port, &real_addr, &real_addr_len))
+                        continue;
+
+                    const int send_socket = udp_relay_sockets[resolved_dest_ip.family == AddressFamily::IPv4 ? 0 : 1];
+                    if (send_socket < 0)
+                        continue;
+
+                    if (sendto(send_socket, recv_buf, recv_len, 0, (struct sockaddr*)&real_addr, real_addr_len) < 0)
+                        log_message("udp relay: direct sendto failed for %s", domain[0] != '\0' ? domain : "");
+                }
+            }
+            else
+            {
+                // Not a tracked client source; treat as an external response for a DIRECT flow.
+                send_udp_payload_to_client(from_ip, from_port, recv_buf, static_cast<size_t>(recv_len));
+            }
         }
 
         if (fds[2].fd >= 0 && (fds[2].revents & POLLIN))
@@ -2001,29 +2108,9 @@ static void * udp_relay_server(void * arg)
             size_t decoded_size = 0;
             if (!decode_socks5_address(recv_buf + 3, recv_len - 3, &source_ip, &source_port, &decoded_size))
                 continue;
+
             const size_t header_size = 3 + decoded_size;
-
-            struct sockaddr_storage client_addr{};
-            socklen_t client_addr_len = 0;
-            int client_socket = -1;
-            pthread_rwlock_rdlock(&conn_lock);
-            for (int hash = 0; hash < CONNECTION_HASH_SIZE && client_socket < 0; ++hash)
-            {
-                for (CONNECTION_INFO* conn = connection_hash_table[hash]; conn != nullptr; conn = conn->next)
-                {
-                    if (conn->orig_dest_ip != source_ip || conn->orig_dest_port != source_port)
-                        continue;
-                    conn->last_activity = get_monotonic_ms();
-                    if (!make_loopback_endpoint(conn->src_ip.family, conn->src_port, &client_addr, &client_addr_len))
-                        continue;
-                    client_socket = udp_relay_sockets[conn->src_ip.family == AddressFamily::IPv4 ? 0 : 1];
-                    break;
-                }
-            }
-            pthread_rwlock_unlock(&conn_lock);
-
-            if (client_socket >= 0)
-                sendto(client_socket, recv_buf + header_size, recv_len - header_size, 0, (struct sockaddr*)&client_addr, client_addr_len);
+            send_udp_payload_to_client(source_ip, source_port, recv_buf + header_size, recv_len - header_size);
         }
 
         if (fds[2].fd >= 0 && (fds[2].revents & (POLLHUP | POLLERR)))
@@ -2416,7 +2503,8 @@ static bool get_connection(
     char* domain,
     bool* is_fake_ip,
     NetworkAddress* resolved_dest_ip,
-    uint16_t* resolved_dest_port)
+    uint16_t* resolved_dest_port,
+    bool* resolved)
 {
     uint32_t hash = connection_hash(src_ip, src_port);
     pthread_rwlock_rdlock(&conn_lock);
@@ -2439,6 +2527,8 @@ static bool get_connection(
                 *resolved_dest_ip = conn->resolved ? conn->resolved_dest_ip : conn->orig_dest_ip;
             if (resolved_dest_port != nullptr)
                 *resolved_dest_port = conn->resolved ? conn->resolved_dest_port : conn->orig_dest_port;
+            if (resolved != nullptr)
+                *resolved = conn->resolved;
             pthread_rwlock_unlock(&conn_lock);
             return true;
         }
