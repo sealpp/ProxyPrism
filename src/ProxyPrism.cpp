@@ -2111,8 +2111,8 @@ static int packet_callback(struct nfq_q_handle * qh, struct nfgenmsg * nfmsg, st
         src_port = ntohs(tcph->source);
         dest_port = ntohs(tcph->dest);
 
-        // skip our own packets from local relay
-        if (src_port == g_local_relay_port)
+        // skip our own packets from local relay and DNS proxy
+        if (src_port == g_local_relay_port || src_port == LOCAL_DNS_PROXY_PORT)
             return nfq_set_verdict(qh, id, NF_ACCEPT, 0, nullptr);
 
         if (is_connection_tracked(src_ip, src_port))
@@ -2214,7 +2214,7 @@ static int packet_callback(struct nfq_q_handle * qh, struct nfgenmsg * nfmsg, st
         src_port = ntohs(udph->source);
         dest_port = ntohs(udph->dest);
 
-        if (src_port == LOCAL_UDP_RELAY_PORT)
+        if (src_port == LOCAL_UDP_RELAY_PORT || src_port == LOCAL_DNS_PROXY_PORT)
             return nfq_set_verdict(qh, id, NF_ACCEPT, 0, nullptr);
 
         if (is_connection_tracked(src_ip, src_port))
@@ -3183,7 +3183,7 @@ bool start(void)
         }
     }
 
-    (void)LOCAL_DNS_PROXY_PORT;
+
 
     nfq_h = nfq_open();
     if (!nfq_h)
