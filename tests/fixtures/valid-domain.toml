@@ -3,7 +3,7 @@ url = "socks5://127.0.0.1:1080"
 
 [[rules]]
 process = "curl"
-hosts = "2001:db8::/129"
+hosts = "*.example.com;example.org"
 ports = "443"
 protocol = "TCP"
 action = "PROXY"

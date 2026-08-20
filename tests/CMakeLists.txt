@@ -1,6 +1,7 @@
 add_executable(proxyprism_unit_tests
     smoke_test.cpp
     NetworkAddressTest.cpp
+    FakeIPStoreTest.cpp
 )
 
 target_link_libraries(proxyprism_unit_tests
@@ -21,10 +22,16 @@ add_test(
 set_tests_properties(config_accepts_ipv6_rule PROPERTIES PASS_REGULAR_EXPRESSION "Config OK")
 
 add_test(
-    NAME config_rejects_hostname_rule
+    NAME config_accepts_domain_rule
+    COMMAND $<TARGET_FILE:proxyprism> --check-config --config ${PROXYPRISM_CONFIG_FIXTURES}/valid-domain.toml
+)
+set_tests_properties(config_accepts_domain_rule PROPERTIES PASS_REGULAR_EXPRESSION "Config OK")
+
+add_test(
+    NAME config_rejects_invalid_host
     COMMAND $<TARGET_FILE:proxyprism> --check-config --config ${PROXYPRISM_CONFIG_FIXTURES}/invalid-hostname.toml
 )
-set_tests_properties(config_rejects_hostname_rule PROPERTIES WILL_FAIL TRUE)
+set_tests_properties(config_rejects_invalid_host PROPERTIES WILL_FAIL TRUE)
 
 add_test(
     NAME config_rejects_invalid_port

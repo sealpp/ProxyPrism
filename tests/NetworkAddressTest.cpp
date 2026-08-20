@@ -46,7 +46,8 @@ TEST(NetworkAddress, PreservesIpv4WildcardAndRangeRules)
 
 TEST(NetworkAddress, RejectsInvalidHostAndPortRules)
 {
-    EXPECT_FALSE(validate_host_list("example.com"));
+    EXPECT_TRUE(validate_host_list("example.com"));
+    EXPECT_TRUE(validate_host_list("*.example.com"));
     EXPECT_FALSE(validate_host_list("2001:db8::/129"));
     EXPECT_FALSE(validate_host_list("2001:db8:*"));
     EXPECT_FALSE(validate_host_list("192.168.1.300"));
@@ -54,6 +55,18 @@ TEST(NetworkAddress, RejectsInvalidHostAndPortRules)
     EXPECT_FALSE(validate_port_list("443-80"));
     EXPECT_FALSE(validate_port_list("80x"));
     EXPECT_TRUE(validate_port_list("53;80,443-8443"));
+}
+
+TEST(NetworkAddress, MatchesMixedIpAndDomainRules)
+{
+    const auto ipv4 = parse_network_address("192.0.2.10");
+    ASSERT_TRUE(ipv4.has_value());
+
+    EXPECT_TRUE(match_target_list("192.0.2.0/24", *ipv4, "example.com"));
+    EXPECT_FALSE(match_target_list("192.0.3.0/24", *ipv4, "example.com"));
+    EXPECT_TRUE(match_target_list("*.example.com", *ipv4, "www.example.com"));
+    EXPECT_TRUE(match_target_list("example.com;192.0.2.0/24", *ipv4, "other.org"));
+    EXPECT_FALSE(match_target_list("*.example.com", *ipv4, "example.org"));
 }
 
 TEST(NetworkAddress, EncodesAndDecodesSocks5Ipv6Addresses)

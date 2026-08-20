@@ -250,6 +250,29 @@ std::string format_network_address(const NetworkAddress& address)
     return buffer;
 }
 
+NetworkAddress network_address_from_ipv4(uint32_t ip)
+{
+    NetworkAddress address;
+    address.family = AddressFamily::IPv4;
+    memcpy(address.bytes.data(), &ip, 4);
+    return address;
+}
+
+NetworkAddress network_address_from_ipv6(const in6_addr& ip)
+{
+    NetworkAddress address;
+    address.family = AddressFamily::IPv6;
+    memcpy(address.bytes.data(), &ip, 16);
+    return address;
+}
+
+NetworkAddress network_address_from_sockaddr(const sockaddr* address)
+{
+    if (address->sa_family == AF_INET6)
+        return network_address_from_ipv6(((const sockaddr_in6*)address)->sin6_addr);
+    return network_address_from_ipv4(((const sockaddr_in*)address)->sin_addr.s_addr);
+}
+
 bool match_host_pattern(std::string_view pattern, const NetworkAddress& address)
 {
     pattern = trim(pattern);
@@ -269,6 +292,31 @@ bool match_host_list(std::string_view patterns, const NetworkAddress& address)
     return any_token(patterns, ";", [&](std::string_view token) { return match_host_pattern(token, address); });
 }
 
+static bool looks_like_ip_pattern(std::string_view token)
+{
+    // IPv6 literal or CIDR
+    if (token.find(':') != std::string_view::npos || token.find('/') != std::string_view::npos)
+        return true;
+
+    // IPv4-style wildcard or range
+    bool has_wildcard_or_range = false;
+    for (char c : token)
+    {
+        if (c == '*' || c == '-')
+        {
+            has_wildcard_or_range = true;
+        }
+        else if (c != '.' && (c < '0' || c > '9'))
+        {
+            // contains letters or other characters, not a pure IPv4 pattern
+            return false;
+        }
+    }
+
+    // pure IPv4 with optional wildcard/range
+    return has_wildcard_or_range || token.find('.') != std::string_view::npos;
+}
+
 bool validate_host_list(std::string_view patterns, std::string* error_message)
 {
     return validate_tokens(
@@ -284,6 +332,8 @@ bool validate_host_list(std::string_view patterns, std::string* error_message)
             if (token.find('*') != std::string_view::npos || token.find('-') != std::string_view::npos)
                 if (validate_ipv4_wildcard(token))
                     return true;
+            if (looks_like_ip_pattern(token))
+                return false;
             return validate_domain_pattern(token);
         },
         error_message);

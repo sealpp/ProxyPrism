@@ -3,6 +3,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <netinet/in.h>
 #include <sys/socket.h>
 #include <optional>
 #include <string>
@@ -61,6 +62,10 @@ bool make_loopback_endpoint(
     std::uint16_t port,
     sockaddr_storage* endpoint,
     socklen_t* endpoint_size);
+
+NetworkAddress network_address_from_ipv4(std::uint32_t ip);
+NetworkAddress network_address_from_ipv6(const in6_addr& ip);
+NetworkAddress network_address_from_sockaddr(const sockaddr* address);
 
 struct NetworkAddressHash {
     std::size_t operator()(const NetworkAddress& address) const noexcept;
