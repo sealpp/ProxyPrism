@@ -63,6 +63,13 @@ bool make_loopback_endpoint(
     sockaddr_storage* endpoint,
     socklen_t* endpoint_size);
 
+// Build a generic sockaddr_storage from a NetworkAddress and port.
+bool make_endpoint(
+    const NetworkAddress& address,
+    std::uint16_t port,
+    sockaddr_storage* endpoint,
+    socklen_t* endpoint_size);
+
 NetworkAddress network_address_from_ipv4(std::uint32_t ip);
 NetworkAddress network_address_from_ipv6(const in6_addr& ip);
 NetworkAddress network_address_from_sockaddr(const sockaddr* address);

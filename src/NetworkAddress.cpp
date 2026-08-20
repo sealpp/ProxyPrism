@@ -435,6 +435,35 @@ bool make_loopback_endpoint(
     return true;
 }
 
+bool make_endpoint(
+    const NetworkAddress& address,
+    std::uint16_t port,
+    sockaddr_storage* endpoint,
+    socklen_t* endpoint_size)
+{
+    if (endpoint == nullptr || endpoint_size == nullptr)
+        return false;
+
+    memset(endpoint, 0, sizeof(*endpoint));
+    if (address.family == AddressFamily::IPv4)
+    {
+        auto* ipv4 = reinterpret_cast<sockaddr_in*>(endpoint);
+        ipv4->sin_family = AF_INET;
+        memcpy(&ipv4->sin_addr.s_addr, address.bytes.data(), 4);
+        ipv4->sin_port = htons(port);
+        *endpoint_size = sizeof(*ipv4);
+    }
+    else
+    {
+        auto* ipv6 = reinterpret_cast<sockaddr_in6*>(endpoint);
+        ipv6->sin6_family = AF_INET6;
+        memcpy(&ipv6->sin6_addr, address.bytes.data(), 16);
+        ipv6->sin6_port = htons(port);
+        *endpoint_size = sizeof(*ipv6);
+    }
+    return true;
+}
+
 // Domain glob matching: '*' matches any substring (including empty), '?' matches any single character.
 // Matching is case-insensitive and ignores a trailing dot on the domain.
 
