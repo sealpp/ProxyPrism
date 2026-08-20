@@ -1229,7 +1229,7 @@ static void * connection_handler(void * arg)
 
         struct sockaddr_storage real_addr{};
         socklen_t real_addr_len = 0;
-        if (g_dns_proxy == nullptr || !g_dns_proxy->resolve_domain(domain, dest_port, &real_addr, &real_addr_len))
+        if (g_dns_proxy == nullptr || !g_dns_proxy->resolve_domain(domain, dest_port, &real_addr, &real_addr_len, dest_ip.family))
         {
             log_message("direct fake-ip: failed to resolve %s", domain);
             close(client_sock);

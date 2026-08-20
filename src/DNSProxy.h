@@ -22,7 +22,14 @@ public:
 
     // Resolve an original domain directly against the configured real nameserver.
     // The query socket is marked so it bypasses the local fake-DNS REDIRECT path.
-    bool resolve_domain(const char* domain, std::uint16_t port, sockaddr_storage* out, socklen_t* out_len);
+    // preferred_family hints which record type to prefer (IPv4 or IPv6); both are
+    // queried if needed and the other family is used as fallback.
+    bool resolve_domain(
+        const char* domain,
+        std::uint16_t port,
+        sockaddr_storage* out,
+        socklen_t* out_len,
+        AddressFamily preferred_family = AddressFamily::IPv4);
 
 private:
     void run();

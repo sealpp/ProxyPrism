@@ -695,15 +695,22 @@ void DNSProxy::run()
     }
 }
 
-bool DNSProxy::resolve_domain(const char* domain, uint16_t port, sockaddr_storage* out, socklen_t* out_len)
+bool DNSProxy::resolve_domain(
+    const char* domain,
+    uint16_t port,
+    sockaddr_storage* out,
+    socklen_t* out_len,
+    AddressFamily preferred_family)
 {
     if (domain == nullptr || domain[0] == '\0' || out == nullptr || out_len == nullptr)
         return false;
 
-    // Prefer A, then AAAA.
-    if (resolve_domain_qtype(domain, port, 1, out, out_len))
+    const uint16_t preferred_qtype = (preferred_family == AddressFamily::IPv6) ? 28 : 1;
+    const uint16_t fallback_qtype = (preferred_qtype == 1) ? 28 : 1;
+
+    if (resolve_domain_qtype(domain, port, preferred_qtype, out, out_len))
         return true;
-    return resolve_domain_qtype(domain, port, 28, out, out_len);
+    return resolve_domain_qtype(domain, port, fallback_qtype, out, out_len);
 }
 
 bool DNSProxy::resolve_domain_qtype(const char* domain, uint16_t port, uint16_t qtype, sockaddr_storage* out, socklen_t* out_len)
