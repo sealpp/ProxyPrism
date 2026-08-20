@@ -230,6 +230,9 @@ typedef struct CONNECTION_INFO
     NetworkAddress src_ip;
     NetworkAddress orig_dest_ip;
     uint16_t orig_dest_port;
+    NetworkAddress resolved_dest_ip;
+    uint16_t resolved_dest_port;
+    bool resolved;
     bool is_tracked;
     uint64_t last_activity;
     RuleAction action;
@@ -521,7 +524,9 @@ static bool get_connection(
     uint16_t* dest_port,
     RuleAction* action = nullptr,
     char* domain = nullptr,
-    bool* is_fake_ip = nullptr);
+    bool* is_fake_ip = nullptr,
+    NetworkAddress* resolved_dest_ip = nullptr,
+    uint16_t* resolved_dest_port = nullptr);
 static bool is_connection_tracked(const NetworkAddress& src_ip, uint16_t src_port);
 static void cleanup_stale_connections(void);
 static bool is_connection_already_logged(uint32_t pid, const NetworkAddress& dest_ip, uint16_t dest_port, RuleAction action);
@@ -2362,6 +2367,9 @@ static void add_connection(
         {
             conn->orig_dest_ip = dest_ip;
             conn->orig_dest_port = dest_port;
+            conn->resolved_dest_ip = is_fake_ip ? NetworkAddress{} : dest_ip;
+            conn->resolved_dest_port = is_fake_ip ? 0 : dest_port;
+            conn->resolved = !is_fake_ip;
             conn->src_ip = src_ip;
             conn->is_tracked = true;
             conn->last_activity = get_monotonic_ms();
@@ -2382,6 +2390,9 @@ static void add_connection(
     new_conn->src_ip = src_ip;
     new_conn->orig_dest_ip = dest_ip;
     new_conn->orig_dest_port = dest_port;
+    new_conn->resolved_dest_ip = is_fake_ip ? NetworkAddress{} : dest_ip;
+    new_conn->resolved_dest_port = is_fake_ip ? 0 : dest_port;
+    new_conn->resolved = !is_fake_ip;
     new_conn->is_tracked = true;
     new_conn->last_activity = get_monotonic_ms();
     new_conn->action = action;
@@ -2403,7 +2414,9 @@ static bool get_connection(
     uint16_t* dest_port,
     RuleAction* action,
     char* domain,
-    bool* is_fake_ip)
+    bool* is_fake_ip,
+    NetworkAddress* resolved_dest_ip,
+    uint16_t* resolved_dest_port)
 {
     uint32_t hash = connection_hash(src_ip, src_port);
     pthread_rwlock_rdlock(&conn_lock);
@@ -2422,6 +2435,10 @@ static bool get_connection(
                 *is_fake_ip = conn->is_fake_ip;
             if (domain != nullptr)
                 snprintf(domain, 256, "%s", conn->domain[0] != '\0' ? conn->domain : "");
+            if (resolved_dest_ip != nullptr)
+                *resolved_dest_ip = conn->resolved ? conn->resolved_dest_ip : conn->orig_dest_ip;
+            if (resolved_dest_port != nullptr)
+                *resolved_dest_port = conn->resolved ? conn->resolved_dest_port : conn->orig_dest_port;
             pthread_rwlock_unlock(&conn_lock);
             return true;
         }
@@ -2442,6 +2459,34 @@ static bool is_connection_tracked(const NetworkAddress& src_ip, uint16_t src_por
     {
         if (conn->src_port == src_port && conn->src_ip == src_ip && conn->is_tracked)
         {
+            pthread_rwlock_unlock(&conn_lock);
+            return true;
+        }
+        conn = conn->next;
+    }
+
+    pthread_rwlock_unlock(&conn_lock);
+    return false;
+}
+
+static bool set_resolved_connection(
+    const NetworkAddress& src_ip,
+    uint16_t src_port,
+    const NetworkAddress& resolved_ip,
+    uint16_t resolved_port)
+{
+    uint32_t hash = connection_hash(src_ip, src_port);
+    pthread_rwlock_wrlock(&conn_lock);
+
+    CONNECTION_INFO* conn = connection_hash_table[hash];
+    while (conn != nullptr)
+    {
+        if (conn->src_port == src_port && conn->src_ip == src_ip && conn->is_tracked)
+        {
+            conn->resolved_dest_ip = resolved_ip;
+            conn->resolved_dest_port = resolved_port;
+            conn->resolved = true;
+            conn->last_activity = get_monotonic_ms();
             pthread_rwlock_unlock(&conn_lock);
             return true;
         }
