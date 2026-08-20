@@ -20,8 +20,13 @@ public:
     bool start(uint16_t port = 34053);
     void stop();
 
+    // Resolve an original domain directly against the configured real nameserver.
+    // The query socket is marked so it bypasses the local fake-DNS REDIRECT path.
+    bool resolve_domain(const char* domain, std::uint16_t port, sockaddr_storage* out, socklen_t* out_len);
+
 private:
     void run();
+    bool resolve_domain_qtype(const char* domain, std::uint16_t port, std::uint16_t qtype, sockaddr_storage* out, socklen_t* out_len);
 
     FakeIPStore& store_;
     sockaddr_storage nameserver_;

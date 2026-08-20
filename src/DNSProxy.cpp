@@ -4,6 +4,7 @@
 #include <arpa/inet.h>
 #include <cctype>
 #include <cerrno>
+#include <ctime>
 #include <cstdio>
 #include <cstring>
 #include <fcntl.h>
@@ -31,6 +32,40 @@ ssize_t send_all(int sock, const char* buf, size_t len)
         sent += n;
     }
     return sent;
+}
+
+bool build_dns_qname(const char* domain, uint8_t* out, size_t out_size, size_t* out_len)
+{
+    if (domain == nullptr || out == nullptr || out_len == nullptr)
+        return false;
+
+    size_t pos = 0;
+    const char* start = domain;
+
+    while (*start != '\0')
+    {
+        if (*start == '.')
+            return false;
+
+        const char* dot = strchr(start, '.');
+        size_t label_len = dot != nullptr ? static_cast<size_t>(dot - start) : strlen(start);
+
+        if (label_len == 0 || label_len > 63 || pos + 1 + label_len + 1 > out_size)
+            return false;
+
+        out[pos++] = static_cast<uint8_t>(label_len);
+        memcpy(out + pos, start, label_len);
+        pos += label_len;
+
+        if (dot == nullptr)
+            break;
+
+        start = dot + 1;
+    }
+
+    out[pos++] = 0;
+    *out_len = pos;
+    return true;
 }
 
 struct DNSHeader {
@@ -658,6 +693,144 @@ void DNSProxy::run()
             }
         }
     }
+}
+
+bool DNSProxy::resolve_domain(const char* domain, uint16_t port, sockaddr_storage* out, socklen_t* out_len)
+{
+    if (domain == nullptr || domain[0] == '\0' || out == nullptr || out_len == nullptr)
+        return false;
+
+    // Prefer A, then AAAA.
+    if (resolve_domain_qtype(domain, port, 1, out, out_len))
+        return true;
+    return resolve_domain_qtype(domain, port, 28, out, out_len);
+}
+
+bool DNSProxy::resolve_domain_qtype(const char* domain, uint16_t port, uint16_t qtype, sockaddr_storage* out, socklen_t* out_len)
+{
+    if (nameserver_len_ == 0)
+        return false;
+
+    uint8_t qname[256];
+    size_t qname_len = 0;
+    if (!build_dns_qname(domain, qname, sizeof(qname), &qname_len))
+        return false;
+
+    uint8_t query[512];
+    memset(query, 0, sizeof(query));
+
+    const uint16_t query_id = static_cast<uint16_t>(time(nullptr) ^ port ^ qtype ^ getpid());
+    write_u16(query, query_id);
+    write_u16(query + 2, 0x0100); // standard query with recursion desired
+    write_u16(query + 4, 1);      // qdcount
+    write_u16(query + 6, 0);
+    write_u16(query + 8, 0);
+    write_u16(query + 10, 0);
+
+    size_t pos = 12;
+    memcpy(query + pos, qname, qname_len);
+    pos += qname_len;
+    write_u16(query + pos, qtype);
+    pos += 2;
+    write_u16(query + pos, 1); // IN
+    pos += 2;
+
+    const int family = (nameserver_.ss_family == AF_INET) ? AF_INET : AF_INET6;
+    int fd = socket(family, SOCK_DGRAM | SOCK_CLOEXEC, 0);
+    if (fd < 0)
+        return false;
+
+    set_socket_mark(fd, mark_for_bypass_);
+
+    struct timeval tv = {3, 0};
+    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+
+    if (sendto(fd, query, pos, 0, reinterpret_cast<sockaddr*>(&nameserver_), nameserver_len_) < 0)
+    {
+        close(fd);
+        return false;
+    }
+
+    uint8_t resp[1024];
+    ssize_t n = recv(fd, resp, sizeof(resp), 0);
+    close(fd);
+    if (n <= 0)
+        return false;
+
+    if (static_cast<size_t>(n) < 12)
+        return false;
+
+    const uint16_t resp_flags = read_u16(resp + 2);
+    if ((resp_flags & 0x8000) == 0) // not a response
+        return false;
+    if ((resp_flags & 0x0F) != 0) // rcode != NOERROR
+        return false;
+
+    const uint16_t qdcount = read_u16(resp + 4);
+    const uint16_t ancount = read_u16(resp + 6);
+    if (ancount == 0)
+        return false;
+
+    // Skip questions.
+    size_t offset = 12;
+    for (uint16_t i = 0; i < qdcount; ++i)
+    {
+        char name[256];
+        const int consumed = parse_dns_name(resp, static_cast<size_t>(n), offset, name, sizeof(name));
+        if (consumed < 0)
+            return false;
+        offset += static_cast<size_t>(consumed) + 4;
+        if (offset > static_cast<size_t>(n))
+            return false;
+    }
+
+    // Look for the first matching A/AAAA answer.
+    for (uint16_t i = 0; i < ancount; ++i)
+    {
+        char name[256];
+        int consumed = parse_dns_name(resp, static_cast<size_t>(n), offset, name, sizeof(name));
+        if (consumed < 0)
+            return false;
+        offset += static_cast<size_t>(consumed);
+
+        if (offset + 10 > static_cast<size_t>(n))
+            return false;
+
+        const uint16_t atype = read_u16(resp + offset);
+        const uint16_t aclass = read_u16(resp + offset + 2);
+        const uint16_t rdlen = read_u16(resp + offset + 8);
+        offset += 10;
+
+        if (offset + rdlen > static_cast<size_t>(n))
+            return false;
+
+        if (aclass == 1 && atype == qtype && rdlen == (qtype == 1 ? 4u : 16u))
+        {
+            memset(out, 0, sizeof(*out));
+            if (qtype == 1)
+            {
+                auto* in4 = reinterpret_cast<sockaddr_in*>(out);
+                in4->sin_family = AF_INET;
+                in4->sin_port = htons(port);
+                memcpy(&in4->sin_addr.s_addr, resp + offset, 4);
+                *out_len = sizeof(*in4);
+            }
+            else
+            {
+                auto* in6 = reinterpret_cast<sockaddr_in6*>(out);
+                in6->sin6_family = AF_INET6;
+                in6->sin6_port = htons(port);
+                memcpy(&in6->sin6_addr, resp + offset, 16);
+                *out_len = sizeof(*in6);
+            }
+            return true;
+        }
+
+        offset += rdlen;
+    }
+
+    return false;
 }
 
 } // namespace proxyprism
