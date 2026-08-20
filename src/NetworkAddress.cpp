@@ -277,11 +277,14 @@ bool validate_host_list(std::string_view patterns, std::string* error_message)
         [](std::string_view token) {
             if (token == "*")
                 return true;
-            if (token.find('*') != std::string_view::npos || token.find('-') != std::string_view::npos)
-                return validate_ipv4_wildcard(token);
             NetworkAddress network;
             int prefix_length = 0;
-            return parse_prefix(token, &network, &prefix_length);
+            if (parse_prefix(token, &network, &prefix_length))
+                return true;
+            if (token.find('*') != std::string_view::npos || token.find('-') != std::string_view::npos)
+                if (validate_ipv4_wildcard(token))
+                    return true;
+            return validate_domain_pattern(token);
         },
         error_message);
 }
@@ -380,6 +383,104 @@ bool make_loopback_endpoint(
         *endpoint_size = sizeof(*ipv6);
     }
     return true;
+}
+
+// Domain glob matching: '*' matches any substring (including empty), '?' matches any single character.
+// Matching is case-insensitive and ignores a trailing dot on the domain.
+
+namespace {
+
+std::string normalize_for_match(std::string_view value)
+{
+    std::string result;
+    result.reserve(value.size());
+    for (char c : value)
+        result.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
+    if (!result.empty() && result.back() == '.')
+        result.pop_back();
+    return result;
+}
+
+bool glob_match(const char* p, std::size_t plen, const char* d, std::size_t dlen)
+{
+    std::size_t pi = 0;
+    std::size_t di = 0;
+    std::size_t star_pi = std::string::npos;
+    std::size_t star_di = 0;
+
+    while (di < dlen)
+    {
+        if (pi < plen && (p[pi] == '?' || p[pi] == d[di]))
+        {
+            ++pi;
+            ++di;
+        }
+        else if (pi < plen && p[pi] == '*')
+        {
+            star_pi = pi++;
+            star_di = di;
+        }
+        else if (star_pi != std::string::npos)
+        {
+            pi = star_pi + 1;
+            di = ++star_di;
+        }
+        else
+        {
+            return false;
+        }
+    }
+
+    while (pi < plen && p[pi] == '*')
+        ++pi;
+
+    return pi == plen;
+}
+
+} // namespace
+
+bool match_domain_pattern(std::string_view pattern, std::string_view domain)
+{
+    const std::string p = normalize_for_match(pattern);
+    const std::string d = normalize_for_match(domain);
+    return glob_match(p.c_str(), p.size(), d.c_str(), d.size());
+}
+
+bool match_domain_list(std::string_view patterns, std::string_view domain)
+{
+    return any_token(patterns, ";", [&](std::string_view token) { return match_domain_pattern(token, domain); });
+}
+
+bool validate_domain_pattern(std::string_view pattern)
+{
+    pattern = trim(pattern);
+    if (pattern.empty())
+        return false;
+    if (pattern == "*")
+        return true;
+    // Accept any non-empty token that does not contain the list delimiter.
+    return pattern.find(';') == std::string_view::npos;
+}
+
+bool match_target_list(std::string_view patterns, const NetworkAddress& address, std::string_view domain)
+{
+    return any_token(patterns, ";", [&](std::string_view token) {
+        if (match_host_pattern(token, address))
+            return true;
+        if (!domain.empty())
+            return match_domain_pattern(token, domain);
+        return false;
+    });
+}
+
+std::size_t NetworkAddressHash::operator()(const NetworkAddress& address) const noexcept
+{
+    std::size_t hash = static_cast<std::size_t>(address.family);
+    for (std::size_t i = 0; i < 16; ++i)
+    {
+        hash = hash * 1315423911u + address.bytes[i];
+    }
+    return hash;
 }
 
 } // namespace proxyprism

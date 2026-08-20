@@ -31,6 +31,15 @@ bool match_host_pattern(std::string_view pattern, const NetworkAddress& address)
 bool match_host_list(std::string_view patterns, const NetworkAddress& address);
 bool validate_host_list(std::string_view patterns, std::string* error_message = nullptr);
 
+// Domain rule matching. Patterns support glob: '*' matches any substring (including empty),
+// '?' matches any single character. Matching is case-insensitive and ignores a trailing dot.
+bool match_domain_pattern(std::string_view pattern, std::string_view domain);
+bool match_domain_list(std::string_view patterns, std::string_view domain);
+bool validate_domain_pattern(std::string_view pattern);
+
+// Match against a mixed `hosts` field that may contain IPs or domain patterns.
+bool match_target_list(std::string_view patterns, const NetworkAddress& address, std::string_view domain);
+
 bool match_port_list(std::string_view patterns, std::uint16_t port);
 bool validate_port_list(std::string_view patterns, std::string* error_message = nullptr);
 
@@ -52,5 +61,9 @@ bool make_loopback_endpoint(
     std::uint16_t port,
     sockaddr_storage* endpoint,
     socklen_t* endpoint_size);
+
+struct NetworkAddressHash {
+    std::size_t operator()(const NetworkAddress& address) const noexcept;
+};
 
 } // namespace proxyprism
